@@ -1,8 +1,9 @@
 # Predicción de decisiones basada en actividad cerebral previa en dispositivos wearables
 Proyecto de investigación sobre el libre albedrío: análisis de datos EEG previos a decisiones binarias mediante Deep Learning. Identificación de patrones cerebrales y modelado matemático del mejor algoritmo para predecir elecciones ante estímulos visuales.
 
-## Tareas previas
-1. Instala poetry en tu sistema:
+## Uso
+### Tareas previas
+1. Instala ```poetry``` en tu sistema:
     ```bash
     pipx install poetry
     ```
