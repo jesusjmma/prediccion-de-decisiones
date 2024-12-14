@@ -166,3 +166,6 @@ data/processed/
 
 # Nohup files
 *nohup.out
+
+# Auxiliary data
+aux/
