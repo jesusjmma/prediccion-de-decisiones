@@ -169,3 +169,5 @@ data/processed/
 
 # Auxiliary data
 aux/
+data/splits.csv
+data/subjects.csv

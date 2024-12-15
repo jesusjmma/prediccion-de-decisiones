@@ -1,58 +1,68 @@
+from configparser import ConfigParser
 import os
 import pandas as pd
 import numpy as np
 from sklearn.preprocessing import MinMaxScaler
 import re
+from sets_creator import SetsCreator
 
-ventanas = [100,250,500,750,1000,1500,2000,2500,3000,5000,7500,10000]
+ROOT_BASE_PATH = ".."   # Relative to this file folder
+CONFIG_INI_FILE_RELATIVE_PATH = "config.ini"   # Relative to ROOT_BASE_PATH
 
-script_path = os.path.dirname(os.path.abspath(__file__))
-origen_data_path = f"{script_path}/../data/Muse EEG Subconscious Decisions Dataset"
-local_path = f"{origen_data_path}/Local"
-muse_path = f"{origen_data_path}/Muse"
-processed_data_path = f"{script_path}/../data/processed"
-splits_file = f"{script_path}/../splits.csv"
-sujetos_file = f"{script_path}/../sujetos.csv"
+ROOT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ROOT_BASE_PATH)
+CONFIG_INI_FILE = os.path.join(ROOT_PATH, os.path.normpath(CONFIG_INI_FILE_RELATIVE_PATH))
+
+config = ConfigParser()
+config.read(CONFIG_INI_FILE)
+
+WINDOWS = list(map(int, config['Data']['window_sizes'].split(',')))
+
+LOCAL_PATH = os.path.join(ROOT_PATH, os.path.normpath(config['Paths']['local_raw_data_path']))
+MUSE_PATH = os.path.join(ROOT_PATH, os.path.normpath(config['Paths']['muse_raw_data_path']))
+PROCESSED_DATA_PATH = os.path.join(ROOT_PATH, os.path.normpath(config['Paths']['processed_data_path']))
+SPLITS_FILE = os.path.join(ROOT_PATH, os.path.normpath(config['Paths']['splits_file']))
+SUBJECTS_FILE = os.path.join(ROOT_PATH, os.path.normpath(config['Paths']['subjects_file']))
+
 responses_count = {}
 
 def count_responses(subject, window):
     if subject not in responses_count:
-        responses_count[subject] = [subject, 0] + [0]*len(ventanas)
+        responses_count[subject] = [subject, 0] + [0]*len(WINDOWS)
     responses_count[subject][1] += 1
-    responses_count[subject][ventanas.index(window)+2] += 1
+    responses_count[subject][WINDOWS.index(window)+2] += 1
 
-def write_sujetos_file():
-    with open(sujetos_file, 'w') as file:
-        file.write("Sujeto,NumRespuestasTotal")
-        for ventana in ventanas:
-            file.write(f",NumRespuestas{ventana}ms")
+def write_subjects_file():
+    with open(SUBJECTS_FILE, 'w') as file:
+        file.write("Subject,TotalResponsesNum")
+        for window in WINDOWS:
+            file.write(f",{window}msResponsesCount")
         file.write("\n")
         for key in responses_count:
             file.write(",".join(map(str, responses_count[key])) + "\n")
 
-def init_control_file():
-    with open(splits_file, 'w') as file:
-        file.write("Sujeto,Sesion,Respuesta,Ventana (ms),NumTrozos,Entrenamiento,Fold\n")
+def init_splits_file():
+    with open(SPLITS_FILE, 'w') as file:
+        file.write("Subject,Session,Response,Window (ms),ChunksCount,Training,Fold\n")
         
 
-def add_splits_row(sujeto, sesion, respuesta, ventana, num_trozos):
-    with open(splits_file, 'a') as file:
-        file.write(f"{sujeto},{sesion},{respuesta},{ventana},{num_trozos},,\n")
+def add_splits_row(subject_num, session_num, response_num, window, chunks_num):
+    with open(SPLITS_FILE, 'a') as file:
+        file.write(f"{subject_num},{session_num},{response_num},{window},{chunks_num},,\n")
 
 def load_museData(file_path):
     data_slice = pd.read_csv(file_path, low_memory=False)
     
-    # Columnas relevantes
+    # Relevant columns
     selected_columns = ['TimeStamp','Delta_TP9','Delta_AF7','Delta_AF8','Delta_TP10','Theta_TP9','Theta_AF7','Theta_AF8','Theta_TP10','Alpha_TP9','Alpha_AF7','Alpha_AF8','Alpha_TP10','Beta_TP9','Beta_AF7','Beta_AF8','Beta_TP10','Gamma_TP9','Gamma_AF7','Gamma_AF8','Gamma_TP10']
     data_slice = data_slice[selected_columns]
     
     data_slice['TimeStamp'] = pd.to_datetime(data_slice['TimeStamp'])
     data_slice.replace([float('inf'), float('-inf')], np.nan, inplace=True)
-    data_slice_clean = data_slice.dropna()
-    timestamp_column = data_slice_clean['TimeStamp']
-    features = data_slice_clean.drop(columns=['TimeStamp'])
+    data_slice_cleaned = data_slice.dropna()
+    timestamp_column = data_slice_cleaned['TimeStamp']
+    features = data_slice_cleaned.drop(columns=['TimeStamp'])
 
-    # Normalizar los datos
+    # Data normalization
     scaler = MinMaxScaler()
     features_normalized = scaler.fit_transform(features)
 
@@ -64,67 +74,71 @@ def load_museData(file_path):
     return data_slice_normalized
 
 if __name__ == "__main__":
-    os.makedirs(processed_data_path, exist_ok=True)
+    os.makedirs(PROCESSED_DATA_PATH, exist_ok=True)
 
-    # Crear estructura de directorios
-    print("Creando estructura de directorios y archivos...")
+    # Create directories and files structure
+    print("Creating directories and files structure...")
 
-    results_files = sorted([file for file in os.listdir(local_path) if re.match(r"^results\d+\.csv$", file)], key=lambda x: int(re.search(r"\d+", x).group()))
+    RESULTS_FILES = sorted([file for file in os.listdir(LOCAL_PATH) if re.match(r"^results\d+\.csv$", file)], key=lambda x: int(re.search(r"\d+", x).group()))
 
-    for file in results_files:
-        results = pd.read_csv(f"{local_path}/{file}")
+    init_splits_file()
+
+    for file in RESULTS_FILES:
+        results = pd.read_csv(f"{LOCAL_PATH}/{file}")
         
-        num_sujeto = results["ID del participante"].unique()[0]
-        print(f"Creando estructura para sujeto {num_sujeto}...")
-        sujeto_path = f"{processed_data_path}/sujeto{num_sujeto}"
-        os.makedirs(sujeto_path, exist_ok=True)
+        subject_num = results["ID del participante"].unique()[0]
+        print(f"Creating structure for subject {subject_num}...")
+        subject_path = f"{PROCESSED_DATA_PATH}/subject{subject_num}"
+        os.makedirs(subject_path, exist_ok=True)
 
-        museData = load_museData(f"{muse_path}/museData{num_sujeto}.csv")
-        
-        init_control_file()
+        museData = load_museData(f"{MUSE_PATH}/museData{subject_num}.csv")
 
-        num_sesiones = results["Trial"].max()+1
-        for num_sesion in range(num_sesiones):
-            print(f"Creando estructura para sujeto {num_sujeto}, sesión {num_sesion}...")
-            sesion_path = f"{sujeto_path}/sesion{num_sesion}"
-            os.makedirs(sesion_path, exist_ok=True)
+        sessions_count = results["Trial"].max()+1
+        for session_num in range(sessions_count):
+            print(f"Creating structure for subject {subject_num}, session {session_num}...")
+            session_path = f"{subject_path}/session{session_num}"
+            os.makedirs(session_path, exist_ok=True)
 
-            num_respuestas = results[results["Trial"] == num_sesion]["Respuesta"].max()+1
-            for num_respuesta in range(num_respuestas):
-                print(f"Creando estructura para sujeto {num_sujeto}, sesión {num_sesion}, respuesta {num_respuesta}...")
-                respuesta_path = f"{sesion_path}/respuesta{num_respuesta}"
-                os.makedirs(respuesta_path, exist_ok=True)
+            num_respuestas = results[results["Trial"] == session_num]["Respuesta"].max()+1
+            for response_num in range(num_respuestas):
+                print(f"Creating structure for subject {subject_num}, session {session_num}, response {response_num}...")
+                response_path = f"{session_path}/response{response_num}"
+                os.makedirs(response_path, exist_ok=True)
                 
-                # Aquí también se podría coger el "Tiempo de aparición de letras", pero hay:
-                # 3 casos en que la ventana de tiempo es negativa,
-                # 6 casos en que es menor que 100ms,
-                # 11 casos en que es menor que 250ms y
-                # 40 casos en que es menor que 500ms
-                inicio = pd.to_datetime(results[(results["Trial"] == num_sesion) & (results["Respuesta"] == num_respuesta)]["Tiempo de inicio"].iloc[0])
-                fin = pd.to_datetime(results[(results["Trial"] == num_sesion) & (results["Respuesta"] == num_respuesta)]["Tiempo de la pulsación"].iloc[0])
+                # Here we could also take the "Tiempo de aparición de letras", but there are:
+                # 3 cases where the time window is negative,
+                # 6 cases where it is less than 100ms,
+                # 11 cases where it is less than 250ms and
+                # 40 cases where it is less than 500ms
+                start = pd.to_datetime(results[(results["Trial"] == session_num) & (results["Respuesta"] == response_num)]["Tiempo de inicio"].iloc[0])
+                end = pd.to_datetime(results[(results["Trial"] == session_num) & (results["Respuesta"] == response_num)]["Tiempo de la pulsación"].iloc[0])
                 
-                duracion = round((fin - inicio).total_seconds()*1000)
+                duration = round((end - start).total_seconds()*1000)
 
-                # Si la duración es negativa, no se tiene en cuenta
-                if duracion < 0:
+                # If the duration is negative, it will be ignored
+                if duration < 0:
                     continue
 
-                for ventana in ventanas:
-                    if ventana > duracion:
+                for window in WINDOWS:
+                    if window > duration:
                         continue
-                    print(f"Creando estructura para sujeto {num_sujeto}, sesión {num_sesion}, respuesta {num_respuesta}, ventana {ventana}ms...")
-                    ventana_path = f"{respuesta_path}/{ventana}ms"
-                    os.makedirs(ventana_path, exist_ok=True)
+                    print(f"Creating structure for subject {subject_num}, session {session_num}, response {response_num}, window {window}ms...")
+                    window_path = f"{response_path}/{window}ms"
+                    os.makedirs(window_path, exist_ok=True)
 
-                    trozos = int(duracion/ventana)
-                    for i in range(trozos):
-                        inicio_trozo = fin-pd.Timedelta(ventana*(trozos-i), unit="ms")
-                        fin_trozo = fin-pd.Timedelta(ventana*(trozos-i-1), unit="ms")
+                    chunks_num = int(duration/window)
+                    for i in range(chunks_num):
+                        chunk_start = end-pd.Timedelta(window*(chunks_num-i), unit="ms")
+                        chunk_end = end-pd.Timedelta(window*(chunks_num-i-1), unit="ms")
 
-                        museData_trozo = museData[(museData["TimeStamp"] >= inicio_trozo) & (museData["TimeStamp"] < fin_trozo)]
-                        museData_trozo.to_csv(f"{ventana_path}/trozo{i}.csv", index=False)
+                        museData_chunk = museData[(museData["TimeStamp"] >= chunk_start) & (museData["TimeStamp"] < chunk_end)]
+                        museData_chunk.to_csv(f"{window_path}/chunk{i}.csv", index=False)
                     
-                    add_splits_row(num_sujeto, num_sesion, num_respuesta, ventana, trozos)
-                    count_responses(num_sujeto, ventana)
+                    add_splits_row(subject_num, session_num, response_num, window, chunks_num)
+                    count_responses(subject_num, window)
 
-    write_sujetos_file()
+    write_subjects_file()
+
+    sets_creator = SetsCreator(ROOT_PATH, config)
+    sets_creator.create_sets()
+    
