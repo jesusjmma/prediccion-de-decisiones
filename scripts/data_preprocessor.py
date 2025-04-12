@@ -1,3 +1,30 @@
+"""
+Author: Jesús Maldonado
+Description: Script para preprocesar datos de EEG y crear conjuntos de entrenamiento y test.
+
+data_preprocessor.py llama a sets_creator.py al final del proceso, por lo que bastará con ejecutar el primero para que se ejecute todo el flujo de preprocesado y creación de splits.
+
+Flujo de ejecución:
+1. Creación y preparación de directorios y archivos.
+2. Búsqueda de archivos de resultados en la carpeta Local.
+3. Procesamiento por cada sujeto.
+4. Lectura y normalización de datos EEG (museDataX.csv).
+5. Organización en sesiones y respuestas.
+6. Cálculo de duraciones e identificación de ventanas.
+7. Generación de *chunks* en cada ventana.
+8. Registro de información en splits.csv y contadores.
+9. Creación de subjects.csv.
+10. Ejecución automática de sets_creator.py.
+11. Llamada a sets_creator.py para crear los splits de entrenamiento y test:
+   1. Descubrir los sujetos procesados.
+   2. Separar sujetos en entrenamiento y test.
+   3. Cargar y analizar el contenido de subjects.csv.
+   4. Generar folds.
+   5. Reescribir splits.csv.
+
+Al final tendrás todos los datos EEG normalizados, troceados y clasificados por sujeto, sesión, respuesta y ventana, además de los archivos .csv que resumen el contenido y permiten trabajar directamente con los conjuntos de entrenamiento, validación y test.
+"""
+
 from configparser import ConfigParser
 import os
 import pandas as pd
@@ -50,6 +77,7 @@ def add_splits_row(subject_num, session_num, response_num, window, chunks_num):
         file.write(f"{subject_num},{session_num},{response_num},{window},{chunks_num},,\n")
 
 def load_museData(file_path):
+
     data_slice = pd.read_csv(file_path, low_memory=False)
     
     # Relevant columns
@@ -141,4 +169,3 @@ if __name__ == "__main__":
 
     sets_creator = SetsCreator(ROOT_PATH, config)
     sets_creator.create_sets()
-    
