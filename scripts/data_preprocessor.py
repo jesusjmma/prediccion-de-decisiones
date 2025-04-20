@@ -101,13 +101,19 @@ def load_museData(file_path):
 
     return data_slice_normalized
 
+def extract_number_from_filename(filename: str) -> int:
+    match = re.search(r"\d+", filename)
+    assert match is not None, f"No se encontró número en el nombre del archivo: {filename}"
+    return int(match.group())
+
+
 if __name__ == "__main__":
     os.makedirs(PROCESSED_DATA_PATH, exist_ok=True)
 
     # Create directories and files structure
     print("Creating directories and files structure...")
 
-    RESULTS_FILES = sorted([file for file in os.listdir(LOCAL_PATH) if re.match(r"^results\d+\.csv$", file)], key=lambda x: int(re.search(r"\d+", x).group()))
+    RESULTS_FILES = sorted([file for file in os.listdir(LOCAL_PATH) if re.match(r"^results\d+\.csv$", file)], key=extract_number_from_filename)
 
     init_splits_file()
 
@@ -167,5 +173,5 @@ if __name__ == "__main__":
 
     write_subjects_file()
 
-    sets_creator = SetsCreator(ROOT_PATH, config)
+    sets_creator = SetsCreator(ROOT_BASE_PATH, CONFIG_INI_FILE_RELATIVE_PATH)
     sets_creator.create_sets()
