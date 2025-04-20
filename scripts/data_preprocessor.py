@@ -1,177 +1,447 @@
 """
 Author: Jesús Maldonado
-Description: Script para preprocesar datos de EEG y crear conjuntos de entrenamiento y test.
-
-data_preprocessor.py llama a sets_creator.py al final del proceso, por lo que bastará con ejecutar el primero para que se ejecute todo el flujo de preprocesado y creación de splits.
-
-Flujo de ejecución:
-1. Creación y preparación de directorios y archivos.
-2. Búsqueda de archivos de resultados en la carpeta Local.
-3. Procesamiento por cada sujeto.
-4. Lectura y normalización de datos EEG (museDataX.csv).
-5. Organización en sesiones y respuestas.
-6. Cálculo de duraciones e identificación de ventanas.
-7. Generación de *chunks* en cada ventana.
-8. Registro de información en splits.csv y contadores.
-9. Creación de subjects.csv.
-10. Ejecución automática de sets_creator.py.
-11. Llamada a sets_creator.py para crear los splits de entrenamiento y test:
-   1. Descubrir los sujetos procesados.
-   2. Separar sujetos en entrenamiento y test.
-   3. Cargar y analizar el contenido de subjects.csv.
-   4. Generar folds.
-   5. Reescribir splits.csv.
-
-Al final tendrás todos los datos EEG normalizados, troceados y clasificados por sujeto, sesión, respuesta y ventana, además de los archivos .csv que resumen el contenido y permiten trabajar directamente con los conjuntos de entrenamiento, validación y test.
+Description: Classes for preprocessing EEG data and exporting it in a format suitable for machine learning.
 """
 
+from __future__ import annotations
 from configparser import ConfigParser
-import os
-import pandas as pd
-import numpy as np
-from sklearn.preprocessing import MinMaxScaler
+from dataclasses import dataclass, field
+from math import gcd
+from pathlib import Path
+import random
 import re
-from sets_creator import SetsCreator
+from typing import Any, Optional
 
-ROOT_BASE_PATH = ".."   # Relative to this file folder
-CONFIG_INI_FILE_RELATIVE_PATH = "config.ini"   # Relative to ROOT_BASE_PATH
+import numpy as np
+from numpy.typing import NDArray
+import pandas as pd
 
-ROOT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ROOT_BASE_PATH)
-CONFIG_INI_FILE = os.path.join(ROOT_PATH, os.path.normpath(CONFIG_INI_FILE_RELATIVE_PATH))
+from logger_utils import setup_logger
 
-config = ConfigParser()
-config.read(CONFIG_INI_FILE)
+logger = setup_logger(name=Path(__file__).name, level=10)
 
-WINDOWS = list(map(int, config['Data']['window_sizes'].split(',')))
+__all__ = ["Subject"]
 
-LOCAL_PATH = os.path.join(ROOT_PATH, os.path.normpath(config['Paths']['local_raw_data_path']))
-MUSE_PATH = os.path.join(ROOT_PATH, os.path.normpath(config['Paths']['muse_raw_data_path']))
-PROCESSED_DATA_PATH = os.path.join(ROOT_PATH, os.path.normpath(config['Paths']['processed_data_path']))
-SPLITS_FILE = os.path.join(ROOT_PATH, os.path.normpath(config['Paths']['splits_file']))
-SUBJECTS_FILE = os.path.join(ROOT_PATH, os.path.normpath(config['Paths']['subjects_file']))
+class SingletonMeta(type):
+    """Metaclass that ensures a class has only one instance and provides a global point of access to it."""
+    _instances: dict[type, object] = {}
 
-responses_count = {}
+    def __call__(cls, *args, **kwargs):
+        if cls not in cls._instances:
+            # First call: creates a new instance
+            cls._instances[cls] = super().__call__(*args, **kwargs)
+        # Subsequent calls: returns the existing instance without creating a new one
+        return cls._instances[cls]
 
-def count_responses(subject, window):
-    if subject not in responses_count:
-        responses_count[subject] = [subject, 0] + [0]*len(WINDOWS)
-    responses_count[subject][1] += 1
-    responses_count[subject][WINDOWS.index(window)+2] += 1
+@dataclass(slots=True)
+class Config(metaclass=SingletonMeta):
+    """Lee el archivo de configuración e inicializa parámetros globales (singleton)."""
+    ROOT_BASE_PATH:          str             = ".."
+    RELATIVE_PATH:           str             = "config.ini"
+    config:                  ConfigParser    = field(default_factory=ConfigParser, init=False)
 
-def write_subjects_file():
-    with open(SUBJECTS_FILE, 'w') as file:
-        file.write("Subject,TotalResponsesNum")
-        for window in WINDOWS:
-            file.write(f",{window}msResponsesCount")
-        file.write("\n")
-        for key in responses_count:
-            file.write(",".join(map(str, responses_count[key])) + "\n")
+    # Campos que se calculan en __post_init__
+    ROOT_PATH:               Path            = field(init=False)
+    CONFIG_INI_FILE:         Path            = field(init=False)
+    SAMPLING_RATE:           np.uint16       = field(init=False)
+    SAMPLING_OFFSET:         np.uint16       = field(init=False)
+    TRAINING_DATA_RATIO:     np.float64      = field(init=False)
+    TOTAL_FOLDS:             np.uint8        = field(init=False)
+    SEED:                    int             = field(init=False)
+    WINDOWS:                 list[np.uint16] = field(init=False)
+    LOCAL_PATH:              Path            = field(init=False)
+    MUSE_PATH:               Path            = field(init=False)
+    PROCESSED_FILES_PATH:    Path            = field(init=False)
+    PROCESSED_RESULTS_PATH:  Path            = field(init=False)
+    PROCESSED_MUSEDATA_PATH: Path            = field(init=False)
+    SPLITS_FILE:             Path            = field(init=False)
+    SUBJECTS_FILE:           Path            = field(init=False)
+    RESULTS_FILES_PREFIX:    Path            = field(init=False)
+    MUSEDATA_FILES_PREFIX:   Path            = field(init=False)
+    MUSEDATA_COLUMNS:        list[str]       = field(init=False)
 
-def init_splits_file():
-    with open(SPLITS_FILE, 'w') as file:
-        file.write("Subject,Session,Response,Window (ms),ChunksCount,Training,Fold\n")
+    def __post_init__(self):
+        self.ROOT_PATH = Path(__file__).resolve().parent / self.ROOT_BASE_PATH
+        self.CONFIG_INI_FILE = self.ROOT_PATH / self.RELATIVE_PATH
+
+        if not self.CONFIG_INI_FILE.exists():
+            logger.error(f"Configuration file '{self.CONFIG_INI_FILE}' not found.")
+            raise FileNotFoundError(f"Configuration file '{self.CONFIG_INI_FILE}' not found.")
+        self.config.read(self.CONFIG_INI_FILE, encoding='utf-8')
+
+        cfg_data  = self.config['Data']
+        cfg_rand  = self.config['Random']
+        cfg_paths = self.config['Paths']
+
+        self.SAMPLING_RATE       = np.uint16(cfg_data['sampling_rate'])
+        self.TRAINING_DATA_RATIO = np.float64(cfg_data['training_data_ratio'])
+        self.TOTAL_FOLDS         = np.uint8(cfg_data['folds_number'])
+        self.WINDOWS             = [np.uint16(x) for x in cfg_data['window_sizes'].split(',')]
+        self.MUSEDATA_COLUMNS    = cfg_data['museData_columns'].replace(" ", "").split(',')
+        self.SAMPLING_OFFSET     = np.uint16(1000.0 / self.SAMPLING_RATE)
+        gcd_windows              = np.uint16(gcd(*self.WINDOWS))
+        self.SAMPLING_OFFSET     = np.uint16(max(d for d in range(self.SAMPLING_OFFSET, 0, -1) if gcd_windows % d == 0))
+
+        self.SEED = int(cfg_rand['seed'])
+        random.seed(self.SEED)
+
+        self.LOCAL_PATH              = self.ROOT_PATH / cfg_paths['local_raw_data_path']
+        self.MUSE_PATH               = self.ROOT_PATH / cfg_paths['muse_raw_data_path']
+        self.PROCESSED_FILES_PATH    = self.ROOT_PATH / cfg_paths['processed_files_path']
+        self.PROCESSED_RESULTS_PATH  = self.ROOT_PATH / cfg_paths['processed_results_path']
+        self.PROCESSED_MUSEDATA_PATH = self.ROOT_PATH / cfg_paths['processed_musedata_path']
+        self.SPLITS_FILE             = self.ROOT_PATH / cfg_paths['splits_file']
+        self.SUBJECTS_FILE           = self.ROOT_PATH / cfg_paths['subjects_file']
+        self.RESULTS_FILES_PREFIX    = self.ROOT_PATH / cfg_paths['results_files_prefix']
+        self.MUSEDATA_FILES_PREFIX   = self.ROOT_PATH / cfg_paths['museData_files_prefix']
+
+@dataclass
+class Subject:
+    """Holds EEG results and time-series data for one participant, with methods to split into training and test sets, assign folds, and save/load CSVs."""
+    subject_id:                 np.uint8 = field(init=False)
+    results:                    pd.DataFrame
+    muse_data:                  pd.DataFrame
+    process_raw:                bool                       = field(default=True, repr=False)
+    training_assignment:        Optional[bool]             = None
+    num_trials:                 int                        = 0
+    num_observations:           int                        = 0
+    num_steps:                  int                        = 0
+    num_observations_per_trial: dict[np.uint8, int]             = field(default_factory=dict)
+    num_steps_per_observation:  dict[tuple[np.uint32, np.uint32], int] = field(default_factory=dict)
+    chunks_count_per_window:    dict[int, np.uint16]             = field(default_factory=dict)
+
+    def __post_init__(self):
+        self.subject_id = self.results['ID del participante'].iloc[0]
+        self.training_assignment = self.muse_data['Set'].iloc[0] if not self.process_raw and 'Set' in self.muse_data.columns else None
+        self.muse_data = self.muse_data.resample(f"{Config().SAMPLING_OFFSET}ms").mean().interpolate(method='linear').round(8) if self.process_raw else self.muse_data
+        if self.process_raw:
+            self._assign_series_to_musedata()
+        self.num_trials = self.results['Trial'].max()
+        self.num_observations_per_trial = self.results.groupby('Trial')['Respuesta'].nunique().to_dict()
+        self.num_steps_per_observation = self.muse_data.groupby(['Trial', 'Respuesta']).size().to_dict()
+        self.results['key'] = list(zip(self.results['Trial'], self.results['Respuesta']))
+        self.results['Steps'] = self.results['key'].map(self.num_steps_per_observation).fillna(0).astype('uint32')
+        self.num_observations = sum(self.num_observations_per_trial.values())
+        self.num_steps = sum(self.num_steps_per_observation.values())
         
-
-def add_splits_row(subject_num, session_num, response_num, window, chunks_num):
-    with open(SPLITS_FILE, 'a') as file:
-        file.write(f"{subject_num},{session_num},{response_num},{window},{chunks_num},,\n")
-
-def load_museData(file_path):
-
-    data_slice = pd.read_csv(file_path, low_memory=False)
+        self.muse_data['Set'] = np.full(shape=(self.muse_data.shape[0],), fill_value=self.training_assignment, dtype=bool)
+        self._calculate_chunks_count_per_window() if self.process_raw else None
+        
+    def __str__(self) -> str:
+        return (
+            f"\n{'_' * 22}\n"
+            f"| Subject: {str(self.subject_id).ljust(10)}|\n"
+            f"| Set:     {("Training" if self.training_assignment else "Test").ljust(10)}|\n"
+            f"| Trials:  {str(self.num_trials).ljust(10)}|\n"
+            f"| Observations: {str(self.num_observations).ljust(5)}|\n"
+            f"| Steps:   {str(self.num_steps).ljust(10)}|\n"
+            f"|{'_' * 20}|" 
+        )
     
-    # Relevant columns
-    selected_columns = ['TimeStamp','Delta_TP9','Delta_AF7','Delta_AF8','Delta_TP10','Theta_TP9','Theta_AF7','Theta_AF8','Theta_TP10','Alpha_TP9','Alpha_AF7','Alpha_AF8','Alpha_TP10','Beta_TP9','Beta_AF7','Beta_AF8','Beta_TP10','Gamma_TP9','Gamma_AF7','Gamma_AF8','Gamma_TP10']
-    data_slice = data_slice[selected_columns]
+    def _calculate_chunks_count_per_window(self) -> None:
+        logger.debug(f"Calculating chunks for subject {self.subject_id}...")
+        press_times: pd.Series[pd.Timestamp] = self.results['Tiempo de la pulsación']
+        steps = pd.Series(list(self.num_steps_per_observation.values()), index=self.results.index, dtype=int)
+        
+        for w in Config().WINDOWS:
+            chunk_col = f'chunk_{w}'
+            num_windows: NDArray[np.uint16] = np.floor(steps*int(Config().SAMPLING_OFFSET) / int(w)).astype(np.uint16)
+            first_steps: pd.Series[pd.Timestamp] = press_times - pd.to_timedelta(num_windows * w, unit='ms')
+            
+            start_times = first_steps
+            end_times = press_times
+            mask = start_times != end_times
+
+            chunks_intervals: pd.IntervalIndex = pd.IntervalIndex.from_arrays(pd.DatetimeIndex(first_steps[mask]), pd.DatetimeIndex(press_times[mask]), closed='right')
+
+            idx: NDArray[np.intp] = chunks_intervals.get_indexer(self.muse_data.index)
+
+            self.muse_data[chunk_col] = idx.astype(np.int16)
     
-    data_slice['TimeStamp'] = pd.to_datetime(data_slice['TimeStamp'])
-    data_slice.replace([float('inf'), float('-inf')], np.nan, inplace=True)
-    data_slice_cleaned = data_slice.dropna()
-    timestamp_column = data_slice_cleaned['TimeStamp']
-    features = data_slice_cleaned.drop(columns=['TimeStamp'])
+    @staticmethod
+    def _normalize_subjects(subjects) -> list['Subject']:
+        if isinstance(subjects, dict):
+            return list(subjects.values())
+        elif isinstance(subjects, Subject):
+            return [subjects]
+        return subjects
+    
+    @staticmethod
+    def split_training_test_data(subjects: dict[int, 'Subject'] | list['Subject'] | 'Subject') -> None:
+        """Splits subjects into training and test sets, then divides the training set into folds.
 
-    # Data normalization
-    scaler = MinMaxScaler()
-    features_normalized = scaler.fit_transform(features)
+        Args:
+            subjects: One or more Subject instances to split into sets and folds.
+        """
+        subjects = Subject._normalize_subjects(subjects)
 
-    data_slice_normalized = pd.DataFrame(features_normalized, columns=features.columns)
-    data_slice_normalized.insert(0, 'TimeStamp', timestamp_column.reset_index(drop=True))
+        total_subjects = len(subjects)
 
-    print(data_slice_normalized.describe())
+        training_subjects_size = int(total_subjects * Config().TRAINING_DATA_RATIO)
+        test_subjects_size = total_subjects - training_subjects_size
 
-    return data_slice_normalized
+        training_test_set = [True] * training_subjects_size + [False] * test_subjects_size
+        random.shuffle(training_test_set)
 
-def extract_number_from_filename(filename: str) -> int:
-    match = re.search(r"\d+", filename)
-    assert match is not None, f"No se encontró número en el nombre del archivo: {filename}"
-    return int(match.group())
+        for subject, training_test in zip(subjects, training_test_set):
+            subject.training_assignment = training_test
+            subject.muse_data['Set'] = np.full(shape=(subject.muse_data.shape[0],), fill_value=training_test, dtype=bool)
 
+        Subject.split_data_into_folds(subjects)
+    
+    @staticmethod
+    def split_data_into_folds(subjects: dict[int, 'Subject'] | list['Subject'] | 'Subject') -> None:
+        """Splits the training set into folds for cross-validation.
+        It assigns -1 to the fold for test data and assigns a fold number (0 to TOTAL_FOLDS-1) for training data.
+        
+        Args:
+            subjects: One or more Subject instances to split into folds.
+        """
+        subjects = Subject._normalize_subjects(subjects)
+        
+        total_observations = sum(subject.num_observations for subject in subjects if subject.training_assignment)
+        observations_per_fold = int(total_observations / Config().TOTAL_FOLDS)
+
+        fold_assignment: list[int] = []
+        for i in range(Config().TOTAL_FOLDS-1):
+            fold_assignment += [i] * observations_per_fold
+        
+        fold_assignment += [int(Config().TOTAL_FOLDS - 1)] * (total_observations - len(fold_assignment))
+
+        # Debugging: Count the number of observations per fold
+        counts = {}
+        for fold in fold_assignment:
+            if fold in counts:
+                counts[fold] += 1
+            else:
+                counts[fold] = 1
+        for fold in sorted(counts):
+            logger.debug(f"Fold {fold}: {counts[fold]} observaciones")
+
+        random.shuffle(fold_assignment)
+
+        offset = 0
+        for subject in subjects:
+            logger.debug(f"Assigning folds to subject {subject.subject_id}...")
+            subject_observations = subject.num_observations
+            if subject.training_assignment:
+                subject_observations_assignment = fold_assignment[offset:offset + subject_observations]
+                subject_observations_assignment_to_step = np.repeat(subject_observations_assignment, subject.results['Steps'].to_numpy())
+                subject.muse_data['Fold'] = np.array(subject_observations_assignment_to_step, dtype=np.int8)  # Training data
+                offset += subject_observations
+            else:
+                subject.muse_data['Fold'] = np.full(shape=(subject.muse_data.shape[0],), fill_value=-1, dtype=np.int8)  # Test data
+
+    def _assign_series_to_musedata(self) -> None:
+        """Assigns the 'Trial' and 'Respuesta' columns to the muse_data DataFrame based on the results DataFrame.
+
+        Args:
+            None
+        """
+        # Initialize columns for 'Trial' and 'Respuesta' with NaN values
+        self.muse_data['Trial'] = np.nan
+        self.muse_data['Respuesta'] = np.nan
+
+        # Convert to arrays for faster access
+        muse_timestamps = self.muse_data.index.values.astype('datetime64[ns]')
+        start_times = self.results['Tiempo de inicio'].values.astype('datetime64[ns]')
+        end_times = self.results['Tiempo de la pulsación'].values.astype('datetime64[ns]')
+        trials = self.results['Trial'].values.astype(np.uint8)
+        observations = self.results['Respuesta'].values.astype(np.uint8)
+
+        # Find start/end indices via binary search
+        start_idx = np.searchsorted(muse_timestamps, start_times, side='left')
+        end_idx = np.searchsorted(muse_timestamps, end_times, side='right')
+
+        for i in range(len(self.results)):
+            s_idx, e_idx = start_idx[i], end_idx[i]
+            #e_idx = min(e_idx + 1, len(self.muse_data))
+            # Assign values in the range '[s_idx, e_idx]' (closed interval)
+            self.muse_data.loc[self.muse_data.index[s_idx:e_idx], 'Trial'] = trials[i]
+            self.muse_data.loc[self.muse_data.index[s_idx:e_idx], 'Respuesta'] = observations[i]
+
+        # Remove rows with NaN values in 'Trial' and 'Respuesta'
+        self.muse_data.dropna(subset=['Trial', 'Respuesta'], inplace=True)
+
+        # Convert columns to appropriate types (uint8)
+        self.muse_data['Trial'] = self.muse_data['Trial'].astype(np.uint8)
+        self.muse_data['Respuesta'] = self.muse_data['Respuesta'].astype(np.uint8)
+        
+        self.num_steps_per_observation = self.muse_data.groupby(['Respuesta', 'Trial']).size().to_dict()
+        self.results['key'] = list(zip(self.results['Respuesta'], self.results['Trial']))
+        self.results['Steps'] = self.results['key'].map(self.num_steps_per_observation).fillna(0).astype('uint32')
+        self.results.drop(columns=['key'], inplace=True)
+
+    def _get_observations_windows(self) -> pd.Series[pd.Timedelta]:
+        """Returns the time difference between 'Tiempo de la pulsación' and 'Tiempo de inicio' for each observation.
+
+        Args:
+            None
+        """
+        press_time: pd.Series[pd.Timestamp] = self.results['Tiempo de la pulsación']
+        start_time: pd.Series[pd.Timestamp] = self.results['Tiempo de inicio']
+        observations_windows: pd.Series[pd.Timedelta] = press_time - start_time
+
+        return observations_windows
+    
+    @staticmethod
+    def get_observations_windows(subjects: dict[np.uint8, 'Subject'] | list['Subject'] | 'Subject') -> dict[np.uint8, pd.Series[pd.Timedelta]]:
+        """Return the difference between "Tiempo de la pulsación" and "Tiempo de inicio" in milliseconds for each subject.
+        
+        Args:
+            *subjects: Subject objects to get observation windows from.
+
+        Returns:
+            A dictionary with subject numbers as keys and their corresponding observation windows as values.
+        """
+        subjects = Subject._normalize_subjects(subjects)
+        
+        observations_windows: dict[np.uint8, pd.Series[pd.Timedelta]] = {}
+        for subject in subjects:
+            observations_windows[subject.subject_id] = subject._get_observations_windows()
+
+        return observations_windows
+    
+    def _save_subject(self) -> None:
+        """Saves this subject's results and muse data to CSV files named by subject ID.
+
+        Args:
+            None
+        """
+        logger.info(f"Saving subject {self.subject_id} data to CSV files...")
+        results_filename = f"{Config().RESULTS_FILES_PREFIX}{self.subject_id}.csv"
+        self.results.to_csv(results_filename, index=False)
+        muse_data_filename = f"{Config().MUSEDATA_FILES_PREFIX}{self.subject_id}.csv"
+        self.muse_data.to_csv(muse_data_filename, index=True)
+    
+    @staticmethod
+    def save_subjects(subjects: dict[int, 'Subject'] | list['Subject'] | 'Subject') -> None:
+        """Saves each subject's results and muse data to CSV files named by subject ID.
+
+        Args:
+            subjects: One or more Subject instances to save.
+        """
+        subjects = Subject._normalize_subjects(subjects)
+
+        for subject in subjects:
+            subject._save_subject()
+    
+    @staticmethod
+    def _sanitize_data(results: pd.DataFrame) -> pd.Series[bool]:
+        prev_press = results['Tiempo de la pulsación'].shift(1)
+        mask: pd.Series[bool] = results['Tiempo de inicio'] <= prev_press
+                
+        results.loc[mask, 'Tiempo de inicio'] = prev_press[mask] + pd.Timedelta(milliseconds=1)
+
+        return mask
+
+    @staticmethod
+    def load_data(process_raw = True) -> dict[int, 'Subject']:
+        """Loads raw or processed EEG data from CSV files, creates and processes all Subject instances, and returns a dict of Subject instances.
+
+        Args:
+            process_raw (bool): If True, process raw data files. If False, load processed data files.
+        """
+
+        if process_raw:
+            results_path = Config().LOCAL_PATH
+            museData_path = Config().MUSE_PATH
+            Config().PROCESSED_RESULTS_PATH.mkdir(parents=True, exist_ok=True)
+            Config().PROCESSED_MUSEDATA_PATH.mkdir(parents=True, exist_ok=True)
+            training_assignment = None
+            converter={"Tecla elegida": Subject._bool_converter}
+        else:
+            results_path = Config().PROCESSED_RESULTS_PATH
+            museData_path = Config().PROCESSED_MUSEDATA_PATH
+            converter=None
+
+        # Look for files in the directories
+        files_dict = Subject._look_for_files(results_path, museData_path)
+
+        subjects: dict[int, Subject] = {}
+
+        for id, results_file in sorted(files_dict[str(results_path.resolve())].items()):
+            museData_file = files_dict[str(museData_path.resolve())].get(id)
+            if museData_file is None:
+                logger.warning(f"Warning: There's no museData file for subject {id} in {museData_path}.")
+                continue
+            
+            logger.info(f"Processing subject {id}...")
+            
+            with open(museData_file, 'r') as f:
+                header = f.readline().strip().split(',')
+            
+            columns = Config().MUSEDATA_COLUMNS
+            dtype_map = {'Set': bool, 'Fold': np.uint8, 'Trial': np.uint8, 'Respuesta': np.uint8}
+            selected_columns = [col for col in columns if col in header]
+            dtypes = {col: dtype_map[col] for col in selected_columns if col in dtype_map}
+
+            museData = pd.read_csv(museData_file, low_memory=False, date_format="%Y-%m-%d %H:%M:%S.%f", parse_dates=[0], index_col=0, dtype=dtypes, usecols=selected_columns)
+            museData.replace([float('inf'), float('-inf')], np.nan, inplace=True)
+            cols_to_check = ['Delta_TP9','Delta_AF7','Delta_AF8','Delta_TP10','Theta_TP9','Theta_AF7','Theta_AF8','Theta_TP10','Alpha_TP9','Alpha_AF7','Alpha_AF8','Alpha_TP10','Beta_TP9','Beta_AF7','Beta_AF8','Beta_TP10','Gamma_TP9','Gamma_AF7','Gamma_AF8','Gamma_TP10']
+            museData.dropna(subset=cols_to_check, how='all', inplace=True)
+
+            results = pd.read_csv(results_file, low_memory=False, date_format="%Y-%m-%d %H:%M:%S.%f", parse_dates=[3,4,5,7], converters=converter, dtype={'ID del participante': np.uint8, 'Trial': np.uint8, 'Respuesta': np.uint8, 'Letra observada': "category"})
+            mask = Subject._sanitize_data(results)
+
+            subjects[id] = Subject(results, museData, process_raw=process_raw)
+
+        Subject.split_training_test_data(subjects) if process_raw else None
+
+        return subjects
+    
+    @staticmethod
+    def _bool_converter(value: str) -> bool:
+        _map = {'p': True, 'q': False}
+        try:
+            return _map[value.lower()]
+        except KeyError:
+            logger.error(f"Error: Invalid value '{value}' for boolean conversion.")
+            raise ValueError(f"Invalid value '{value}' for boolean conversion.")
+
+    @staticmethod
+    def _look_for_files(*directories):
+        """Looks for files in the specified directories.
+
+        Args:
+            *directories: Directories to search for files.
+
+        Returns:
+            files_per_directory: Dictionary with directory names as keys and dictionaries of file numbers to filenames as values.
+        """
+        files_per_directory: dict[str, dict[int, str]] = {}
+
+        for directory in directories:
+            path_dir = Path(directory)
+            if not path_dir.is_dir():
+                logger.warning(f"Warning: '{directory}' is not a valid directory.")
+                continue
+
+            files = {}
+            for file in path_dir.iterdir():
+                if file.is_file():
+                    match = re.search(r'(\d+)', file.name)
+                    if match:
+                        number = int(match.group(1))
+                        files[number] = str(file.resolve())
+
+            files_per_directory[str(path_dir.resolve())] = files
+
+        return files_per_directory
+
+def main(process_raw: bool):
+    """Entry point: loads the config file, processes the data, and saves it to processed CSV files.
+    
+    Args:
+        process_raw (bool): If True, process raw data files. If False, load processed data files.
+    """
+    subjects = Subject.load_data(process_raw)    
+    for subject in subjects.values():
+        logger.info(f"{subject}\n")
+    
+    if process_raw:
+        logger.info("Saving processed data to CSV files...")
+        Subject.save_subjects(subjects)
 
 if __name__ == "__main__":
-    os.makedirs(PROCESSED_DATA_PATH, exist_ok=True)
-
-    # Create directories and files structure
-    print("Creating directories and files structure...")
-
-    RESULTS_FILES = sorted([file for file in os.listdir(LOCAL_PATH) if re.match(r"^results\d+\.csv$", file)], key=extract_number_from_filename)
-
-    init_splits_file()
-
-    for file in RESULTS_FILES:
-        results = pd.read_csv(f"{LOCAL_PATH}/{file}")
-        
-        subject_num = results["ID del participante"].unique()[0]
-        print(f"Creating structure for subject {subject_num}...")
-        subject_path = f"{PROCESSED_DATA_PATH}/subject{subject_num}"
-        os.makedirs(subject_path, exist_ok=True)
-
-        museData = load_museData(f"{MUSE_PATH}/museData{subject_num}.csv")
-
-        sessions_count = results["Trial"].max()+1
-        for session_num in range(sessions_count):
-            print(f"Creating structure for subject {subject_num}, session {session_num}...")
-            session_path = f"{subject_path}/session{session_num}"
-            os.makedirs(session_path, exist_ok=True)
-
-            num_respuestas = results[results["Trial"] == session_num]["Respuesta"].max()+1
-            for response_num in range(num_respuestas):
-                print(f"Creating structure for subject {subject_num}, session {session_num}, response {response_num}...")
-                response_path = f"{session_path}/response{response_num}"
-                os.makedirs(response_path, exist_ok=True)
-                
-                # Here we could also take the "Tiempo de aparición de letras", but there are:
-                # 3 cases where the time window is negative,
-                # 6 cases where it is less than 100ms,
-                # 11 cases where it is less than 250ms and
-                # 40 cases where it is less than 500ms
-                start = pd.to_datetime(results[(results["Trial"] == session_num) & (results["Respuesta"] == response_num)]["Tiempo de inicio"].iloc[0])
-                end = pd.to_datetime(results[(results["Trial"] == session_num) & (results["Respuesta"] == response_num)]["Tiempo de la pulsación"].iloc[0])
-                
-                duration = round((end - start).total_seconds()*1000)
-
-                # If the duration is negative, it will be ignored
-                if duration < 0:
-                    continue
-
-                for window in WINDOWS:
-                    if window > duration:
-                        continue
-                    print(f"Creating structure for subject {subject_num}, session {session_num}, response {response_num}, window {window}ms...")
-                    window_path = f"{response_path}/{window}ms"
-                    os.makedirs(window_path, exist_ok=True)
-
-                    chunks_num = int(duration/window)
-                    for i in range(chunks_num):
-                        chunk_start = end-pd.Timedelta(window*(chunks_num-i), unit="ms")
-                        chunk_end = end-pd.Timedelta(window*(chunks_num-i-1), unit="ms")
-
-                        museData_chunk = museData[(museData["TimeStamp"] >= chunk_start) & (museData["TimeStamp"] < chunk_end)]
-                        museData_chunk.to_csv(f"{window_path}/chunk{i}.csv", index=False)
-                    
-                    add_splits_row(subject_num, session_num, response_num, window, chunks_num)
-                    count_responses(subject_num, window)
-
-    write_subjects_file()
-
-    sets_creator = SetsCreator(ROOT_BASE_PATH, CONFIG_INI_FILE_RELATIVE_PATH)
-    sets_creator.create_sets()
+    main(process_raw = True)  # False if you want to load the data from the processed files, True if you want to process the raw data again
