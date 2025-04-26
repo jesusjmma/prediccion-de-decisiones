@@ -6,7 +6,7 @@ authors = ["Jesús Maldonado <jesusjmma@gmail.com>"]
 readme = "README.md"
 license = "Proprietary"
 repository = "https://github.com/jesusjmma/prediccion-de-decisiones"
-package-mode = false
+packages = [{ include = "scripts" }]
 classifiers = [
     "Development Status :: 1 - Planning",
     "Intended Audience :: Science/Research",

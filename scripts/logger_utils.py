@@ -2,7 +2,7 @@ import logging
 import os
 from datetime import datetime
 
-def setup_logger(name: str = "prediccion_de_decisiones", log_dir: str = "../logs", level: int = logging.DEBUG) -> logging.Logger:
+def setup_logger(name: str = "prediccion_de_decisiones", log_dir: str = "./logs", level: int = logging.DEBUG) -> logging.Logger:
     """
     Configura un logger con salida a consola y a un archivo de log por fecha.
 
