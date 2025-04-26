@@ -16,85 +16,9 @@ import numpy as np
 from numpy.typing import NDArray
 import pandas as pd
 
+from config import Config
 from logger_utils import setup_logger
-
 logger = setup_logger(name=Path(__file__).name, level=10)
-
-__all__ = ["Subject"]
-
-class SingletonMeta(type):
-    """Metaclass that ensures a class has only one instance and provides a global point of access to it."""
-    _instances: dict[type, object] = {}
-
-    def __call__(cls, *args, **kwargs):
-        if cls not in cls._instances:
-            # First call: creates a new instance
-            cls._instances[cls] = super().__call__(*args, **kwargs)
-        # Subsequent calls: returns the existing instance without creating a new one
-        return cls._instances[cls]
-
-@dataclass(slots=True)
-class Config(metaclass=SingletonMeta):
-    """Lee el archivo de configuración e inicializa parámetros globales (singleton)."""
-    ROOT_BASE_PATH:          str             = ".."
-    RELATIVE_PATH:           str             = "config.ini"
-    config:                  ConfigParser    = field(default_factory=ConfigParser, init=False)
-
-    # Campos que se calculan en __post_init__
-    ROOT_PATH:               Path            = field(init=False)
-    CONFIG_INI_FILE:         Path            = field(init=False)
-    SAMPLING_RATE:           np.uint16       = field(init=False)
-    SAMPLING_OFFSET:         np.uint16       = field(init=False)
-    TRAINING_DATA_RATIO:     np.float64      = field(init=False)
-    TOTAL_FOLDS:             np.uint8        = field(init=False)
-    SEED:                    int             = field(init=False)
-    WINDOWS:                 list[np.uint16] = field(init=False)
-    LOCAL_PATH:              Path            = field(init=False)
-    MUSE_PATH:               Path            = field(init=False)
-    PROCESSED_FILES_PATH:    Path            = field(init=False)
-    PROCESSED_RESULTS_PATH:  Path            = field(init=False)
-    PROCESSED_MUSEDATA_PATH: Path            = field(init=False)
-    SPLITS_FILE:             Path            = field(init=False)
-    SUBJECTS_FILE:           Path            = field(init=False)
-    RESULTS_FILES_PREFIX:    Path            = field(init=False)
-    MUSEDATA_FILES_PREFIX:   Path            = field(init=False)
-    MUSEDATA_COLUMNS:        list[str]       = field(init=False)
-
-    def __post_init__(self):
-        self.ROOT_PATH = Path(__file__).resolve().parent / self.ROOT_BASE_PATH
-        self.CONFIG_INI_FILE = self.ROOT_PATH / self.RELATIVE_PATH
-
-        if not self.CONFIG_INI_FILE.exists():
-            logger.error(f"Configuration file '{self.CONFIG_INI_FILE}' not found.")
-            raise FileNotFoundError(f"Configuration file '{self.CONFIG_INI_FILE}' not found.")
-        self.config.read(self.CONFIG_INI_FILE, encoding='utf-8')
-
-        cfg_data  = self.config['Data']
-        cfg_rand  = self.config['Random']
-        cfg_paths = self.config['Paths']
-
-        self.SAMPLING_RATE       = np.uint16(cfg_data['sampling_rate'])
-        self.TRAINING_DATA_RATIO = np.float64(cfg_data['training_data_ratio'])
-        self.TOTAL_FOLDS         = np.uint8(cfg_data['folds_number'])
-        self.WINDOWS             = [np.uint16(x) for x in cfg_data['window_sizes'].split(',')]
-        self.MUSEDATA_COLUMNS    = cfg_data['museData_columns'].replace(" ", "").split(',')
-        self.SAMPLING_OFFSET     = np.uint16(1000.0 / self.SAMPLING_RATE)
-        gcd_windows              = np.uint16(gcd(*self.WINDOWS))
-        self.SAMPLING_OFFSET     = np.uint16(max(d for d in range(self.SAMPLING_OFFSET, 0, -1) if gcd_windows % d == 0))
-
-        self.SEED = int(cfg_rand['seed'])
-        random.seed(self.SEED)
-
-        self.LOCAL_PATH              = self.ROOT_PATH / cfg_paths['local_raw_data_path']
-        self.MUSE_PATH               = self.ROOT_PATH / cfg_paths['muse_raw_data_path']
-        self.PROCESSED_FILES_PATH    = self.ROOT_PATH / cfg_paths['processed_files_path']
-        self.PROCESSED_RESULTS_PATH  = self.ROOT_PATH / cfg_paths['processed_results_path']
-        self.PROCESSED_MUSEDATA_PATH = self.ROOT_PATH / cfg_paths['processed_musedata_path']
-        self.SPLITS_FILE             = self.ROOT_PATH / cfg_paths['splits_file']
-        self.SUBJECTS_FILE           = self.ROOT_PATH / cfg_paths['subjects_file']
-        self.RESULTS_FILES_PREFIX    = self.ROOT_PATH / cfg_paths['results_files_prefix']
-        self.MUSEDATA_FILES_PREFIX   = self.ROOT_PATH / cfg_paths['museData_files_prefix']
-
 @dataclass
 class Subject:
     """Holds EEG results and time-series data for one participant, with methods to split into training and test sets, assign folds, and save/load CSVs."""
@@ -144,7 +68,8 @@ class Subject:
         steps = pd.Series(list(self.num_steps_per_observation.values()), index=self.results.index, dtype=int)
         
         for w in Config().WINDOWS:
-            chunk_col = f'chunk_{w}'
+            chunk_observation = f'chunk_{w}_observation'
+            chunk_window = f'chunk_{w}_window'
             num_windows: NDArray[np.uint16] = np.floor(steps*int(Config().SAMPLING_OFFSET) / int(w)).astype(np.uint16)
             first_steps: pd.Series[pd.Timestamp] = press_times - pd.to_timedelta(num_windows * w, unit='ms')
             
@@ -152,12 +77,30 @@ class Subject:
             end_times = press_times
             mask = start_times != end_times
 
-            chunks_intervals: pd.IntervalIndex = pd.IntervalIndex.from_arrays(pd.DatetimeIndex(first_steps[mask]), pd.DatetimeIndex(press_times[mask]), closed='right')
+            observations_intervals: pd.IntervalIndex = pd.IntervalIndex.from_arrays(pd.DatetimeIndex(first_steps[mask]), pd.DatetimeIndex(press_times[mask]), closed='right')
 
-            idx: NDArray[np.intp] = chunks_intervals.get_indexer(self.muse_data.index)
+            idx: NDArray[np.intp] = observations_intervals.get_indexer(self.muse_data.index)
 
-            self.muse_data[chunk_col] = idx.astype(np.int16)
-    
+            self.muse_data[chunk_observation] = idx.astype(np.int16)
+
+            aux = self.muse_data[chunk_observation]
+            aux = aux[aux != -1]
+            count = aux.value_counts()
+            windows: pd.Series[float] = count[count >= 0] / float(w / Config().SAMPLING_OFFSET)
+            timestamps: list[pd.Timestamp] = aux.drop_duplicates().index.tolist()
+            window_unit = np.ones(int(w / Config().SAMPLING_OFFSET), dtype=int)
+            
+            chunk_id = 0
+            for i in range(len(timestamps)):
+                start: pd.Timestamp = timestamps[i]
+                end = start + pd.Timedelta(milliseconds=w)
+                for j in range(int(windows[i])):
+                    mask = (self.muse_data.index >= start) & (self.muse_data.index < end)
+                    self.muse_data.loc[mask, chunk_window] = window_unit * chunk_id
+                    start = end
+                    end += pd.Timedelta(milliseconds=w)
+                    chunk_id += 1
+
     @staticmethod
     def _normalize_subjects(subjects) -> list['Subject']:
         if isinstance(subjects, dict):
@@ -444,4 +387,4 @@ def main(process_raw: bool):
         Subject.save_subjects(subjects)
 
 if __name__ == "__main__":
-    main(process_raw = True)  # False if you want to load the data from the processed files, True if you want to process the raw data again
+    main(process_raw = False)  # False if you want to load the data from the processed files, True if you want to process the raw data again
