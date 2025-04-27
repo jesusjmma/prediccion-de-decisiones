@@ -1,6 +1,6 @@
 """
 Author: Jesús Maldonado
-Description: Classes for preprocessing EEG data and exporting it in a format suitable for machine learning.
+Description: Configuration class for reading an INI file and storing configuration parameters in a singleton. This class is used to manage application configuration settings, including paths, sampling rates, and other parameters.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ import random
 
 import numpy as np
 
-from logger_utils import setup_logger
+from scripts.logger_utils import setup_logger
 logger = setup_logger(name=Path(__file__).name, level=10)
 
 class SingletonMeta(type):
@@ -29,29 +29,37 @@ class SingletonMeta(type):
 @dataclass(slots=True)
 class Config(metaclass=SingletonMeta):
     """Lee el archivo de configuración e inicializa parámetros globales (singleton)."""
-    ROOT_BASE_PATH:          str             = ".."
-    RELATIVE_PATH:           str             = "config.ini"
-    config:                  ConfigParser    = field(default_factory=ConfigParser, init=False)
+    __config:                   ConfigParser    = field(default_factory=ConfigParser, init=False)
+    ROOT_BASE_PATH:             str             = ".."
+    RELATIVE_PATH:              str             = "config.ini"
 
     # Campos que se calculan en __post_init__
-    ROOT_PATH:               Path            = field(init=False)
-    CONFIG_INI_FILE:         Path            = field(init=False)
-    SAMPLING_RATE:           np.uint16       = field(init=False)
-    SAMPLING_OFFSET:         np.uint16       = field(init=False)
-    TRAINING_DATA_RATIO:     np.float64      = field(init=False)
-    TOTAL_FOLDS:             np.uint8        = field(init=False)
-    SEED:                    int             = field(init=False)
-    WINDOWS:                 list[np.uint16] = field(init=False)
-    LOCAL_PATH:              Path            = field(init=False)
-    MUSE_PATH:               Path            = field(init=False)
-    PROCESSED_FILES_PATH:    Path            = field(init=False)
-    PROCESSED_RESULTS_PATH:  Path            = field(init=False)
-    PROCESSED_MUSEDATA_PATH: Path            = field(init=False)
-    SPLITS_FILE:             Path            = field(init=False)
-    SUBJECTS_FILE:           Path            = field(init=False)
-    RESULTS_FILES_PREFIX:    Path            = field(init=False)
-    MUSEDATA_FILES_PREFIX:   Path            = field(init=False)
-    MUSEDATA_COLUMNS:        list[str]       = field(init=False)
+    ROOT_PATH:                  Path            = field(init=False)
+    CONFIG_INI_FILE:            Path            = field(init=False)
+    SAMPLING_RATE:              np.uint16       = field(init=False)
+    SAMPLING_OFFSET:            np.uint16       = field(init=False)
+    TRAINING_DATA_RATIO:        np.float64      = field(init=False)
+    TOTAL_FOLDS:                np.uint8        = field(init=False)
+    SEED:                       int             = field(init=False)
+    WINDOWS:                    list[np.uint16] = field(init=False)
+    LOCAL_PATH:                 Path            = field(init=False)
+    MUSE_PATH:                  Path            = field(init=False)
+    PROCESSED_FILES_PATH:       Path            = field(init=False)
+    PROCESSED_RESULTS_PATH:     Path            = field(init=False)
+    PROCESSED_MUSEDATA_PATH:    Path            = field(init=False)
+    SPLITS_FILE:                Path            = field(init=False)
+    SUBJECTS_FILE:              Path            = field(init=False)
+    RESULTS_FILES_PREFIX:       Path            = field(init=False)
+    MUSEDATA_FILES_PREFIX:      Path            = field(init=False)
+    MUSEDATA_COLUMNS:           list[str]       = field(init=False)
+    MUSEDATA_IMPORTANT_COLUMNS: list[str]       = field(init=False)
+    MODELS_PATH:                Path            = field(init=False)
+    STATS_PATH:                 Path            = field(init=False)
+    CONFUSION_MATRICES_PATH:    Path            = field(init=False)
+    STATS_MODELS_FILE:          Path            = field(init=False)
+    STATS_AGGREGATED_FILE:      Path            = field(init=False)
+    CONFUSION_MATRICES_PREFIX:  Path            = field(init=False)
+    CONFUSION_MATRICES_SUFFIX:  str             = field(init=False)
 
     def __post_init__(self):
         self.ROOT_PATH = Path(__file__).resolve().parent / self.ROOT_BASE_PATH
@@ -60,17 +68,18 @@ class Config(metaclass=SingletonMeta):
         if not self.CONFIG_INI_FILE.exists():
             logger.error(f"Configuration file '{self.CONFIG_INI_FILE}' not found.")
             raise FileNotFoundError(f"Configuration file '{self.CONFIG_INI_FILE}' not found.")
-        self.config.read(self.CONFIG_INI_FILE, encoding='utf-8')
+        self.__config.read(self.CONFIG_INI_FILE, encoding='utf-8')
 
-        cfg_data  = self.config['Data']
-        cfg_rand  = self.config['Random']
-        cfg_paths = self.config['Paths']
+        cfg_data  = self.__config['Data']
+        cfg_rand  = self.__config['Random']
+        cfg_paths = self.__config['Paths']
 
         self.SAMPLING_RATE       = np.uint16(cfg_data['sampling_rate'])
         self.TRAINING_DATA_RATIO = np.float64(cfg_data['training_data_ratio'])
         self.TOTAL_FOLDS         = np.uint8(cfg_data['folds_number'])
         self.WINDOWS             = [np.uint16(x) for x in cfg_data['window_sizes'].split(',')]
         self.MUSEDATA_COLUMNS    = cfg_data['museData_columns'].replace(" ", "").split(',')
+        self.MUSEDATA_IMPORTANT_COLUMNS    = cfg_data['museData_important_columns'].replace(" ", "").split(',')
         self.SAMPLING_OFFSET     = np.uint16(1000.0 / self.SAMPLING_RATE)
         gcd_windows              = np.uint16(gcd(*self.WINDOWS))
         self.SAMPLING_OFFSET     = np.uint16(max(d for d in range(self.SAMPLING_OFFSET, 0, -1) if gcd_windows % d == 0))
@@ -87,3 +96,12 @@ class Config(metaclass=SingletonMeta):
         self.SUBJECTS_FILE           = self.ROOT_PATH / cfg_paths['subjects_file']
         self.RESULTS_FILES_PREFIX    = self.ROOT_PATH / cfg_paths['results_files_prefix']
         self.MUSEDATA_FILES_PREFIX   = self.ROOT_PATH / cfg_paths['museData_files_prefix']
+        self.MODELS_PATH             = self.ROOT_PATH / cfg_paths['models_path']
+
+        self.STATS_PATH                = self.ROOT_PATH / cfg_paths['stats_path']
+        self.CONFUSION_MATRICES_PATH   = self.ROOT_PATH / cfg_paths['confusion_matrices_path']
+        self.STATS_MODELS_FILE         = self.ROOT_PATH / cfg_paths['stats_models_file']
+        self.STATS_AGGREGATED_FILE     = self.ROOT_PATH / cfg_paths['stats_aggregated_file']
+        self.CONFUSION_MATRICES_PREFIX = self.ROOT_PATH / cfg_paths['confusion_matrices_files_prefix']
+        self.CONFUSION_MATRICES_SUFFIX = cfg_paths['confusion_matrices_files_extension']
+
