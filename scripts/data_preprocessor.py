@@ -25,14 +25,14 @@ class Subject:
     subject_id:                 np.uint8 = field(init=False)
     results:                    pd.DataFrame
     muse_data:                  pd.DataFrame
-    process_raw:                bool                       = field(default=True, repr=False)
-    training_assignment:        Optional[bool]             = None
-    num_trials:                 int                        = 0
-    num_observations:           int                        = 0
-    num_steps:                  int                        = 0
-    num_observations_per_trial: dict[np.uint8, int]             = field(default_factory=dict)
+    process_raw:                bool                                   = field(default=True, repr=False)
+    training_assignment:        Optional[bool]                         = None
+    num_trials:                 int                                    = 0
+    num_observations:           int                                    = 0
+    num_steps:                  int                                    = 0
+    num_observations_per_trial: dict[np.uint8, int]                    = field(default_factory=dict)
     num_steps_per_observation:  dict[tuple[np.uint32, np.uint32], int] = field(default_factory=dict)
-    chunks_count_per_window:    dict[int, np.uint16]             = field(default_factory=dict)
+    chunks_count_per_window:    dict[int, np.uint16]                   = field(default_factory=dict)
 
     def __post_init__(self):
         self.subject_id = self.results['ID del participante'].iloc[0]
