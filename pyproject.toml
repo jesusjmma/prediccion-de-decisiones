@@ -20,6 +20,10 @@ python = "^3.13.3"
 pandas = "^2.2.3"
 numpy = "^2.2.5"
 scikit-learn = "^1.6.1"
+imbalanced-learn = "^0.13.0"
+matplotlib = "^3.10.1"
+seaborn = "^0.13.2"
+torch = "^2.7.0"
 
 [build-system]
 requires = ["poetry-core"]
