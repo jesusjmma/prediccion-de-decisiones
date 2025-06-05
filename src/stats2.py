@@ -1,102 +1,31 @@
 """
 Author: Jesús Maldonado
-Description: Statistics and metrics for models evaluation.
+Description: Statistics for models evaluation.
 """
 
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+import torch
+from torch import Tensor
 import pandas as pd
 import numpy as np
 from numpy.typing import NDArray
 import matplotlib.pyplot as plt
 import seaborn as sns
-from imblearn.metrics import geometric_mean_score as gmean
-from sklearn.metrics import (
-    confusion_matrix as cm,
-    accuracy_score as acc,
-    precision_score as prec,
-    recall_score as rec,
-    f1_score as f1
-)
 
 from scripts.config import Config
 from scripts.logger_utils import setup_logger
 
 logger = setup_logger(level="DEBUG")
 
-@dataclass(slots=True)
-class Metrics:
-    model:            str
-    fold:             int
-    y_true:           np.ndarray
-    y_pred:           np.ndarray
-    training_time:    float
-    final_loss:       float
-    accuracy:         float             = -1.0
-    precision:        float             = -1.0
-    recall:           float             = -1.0
-    specificity:      float             = -1.0
-    f1_score:         float             = -1.0
-    f1_score_macro:   float             = -1.0
-    g_mean:           float             = -1.0
-    confusion_matrix: NDArray[np.int64] = field(default_factory=lambda: np.zeros((2, 2), dtype=np.int64))
-
-    def __post_init__(self):
-        self.accuracy = float(acc(self.y_true, self.y_pred))
-        self.precision = float(prec(self.y_true, self.y_pred, zero_division=0))
-        self.recall = float(rec(self.y_true, self.y_pred, zero_division=0))
-        self.confusion_matrix = cm(self.y_true, self.y_pred, labels=[0, 1])
-        tn, fp, fn, tp = self.confusion_matrix.ravel()
-        self.specificity = float(tn / (tn + fp)) if (tn + fp) != 0 else -1.0
-        self.f1_score = float(f1(self.y_true, self.y_pred, zero_division=0))
-        self.f1_score_macro = float(f1(self.y_true, self.y_pred, average='macro', zero_division=0))
-        self.g_mean = float(gmean(self.y_true, self.y_pred))
-
-        logger.info(f"Metrics created: Model={self.model}, Fold={self.fold}, Accuracy={self.accuracy:.4f}")
-
-        if self.accuracy < 0.5:
-            logger.warning(f"Low accuracy ({self.accuracy:.4f}) for Model={self.model}, Fold={self.fold}")
-        if self.specificity != -1.0 and self.specificity < 0.5:
-            logger.warning(f"Low specificity ({self.specificity:.4f}) for Model={self.model}, Fold={self.fold}")
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert the Metrics object to a dictionary.
-        
-        Returns:
-            dict: Dictionary representation of the Metrics object.
-        """
-        logger.debug(f"Converting Metrics to dict: Model={self.model}, Fold={self.fold}")
-        data = asdict(self)
-        data.pop('confusion_matrix', None)
-        return data
-    
-    def to_dataframe(self) -> pd.DataFrame:
-        """Convert the Metrics object to a pandas DataFrame.
-        
-        Returns:
-            pd.DataFrame: DataFrame representation of the Metrics object.
-        """
-        return pd.DataFrame([self.to_dict()])
-    
-    def log_summary(self) -> None:
-        """Log the summary of the metrics for the model and fold."""
-        logger.info(f"===== METRICS SUMMARY FOR [{self.model}] [fold {self.fold}] =====")
-        logger.info(f"Training Time (s):    {self.training_time:.2f}")
-        logger.info(f"Final Loss:           {self.final_loss:.6f}")
-        logger.info(f"Accuracy:             {self.accuracy:.4f}")
-        logger.info(f"Precision:            {self.precision:.4f}")
-        logger.info(f"Recall (Sensitivity): {self.recall:.4f}")
-        logger.info(f"Specificity:          {self.specificity:.4f}")
-        logger.info(f"F1-Score:             {self.f1_score:.4f}")
-        logger.info(f"F1-Score (Macro):     {self.f1_score_macro:.4f}")
-        logger.info(f"G-Mean:               {self.g_mean:.4f}")
-        logger.info(f"Confusion Matrix:   \n{self.confusion_matrix}")
-        logger.info("==============================================================")
-
-
 class Stats:
+    pass
+
+
+
+'''
     def __init__(self):
         Config().STATS_PATH.mkdir(parents=True, exist_ok=True)
         Config().CONFUSION_MATRICES_PATH.mkdir(parents=True, exist_ok=True)
@@ -267,3 +196,4 @@ if __name__ == "__main__":
     agg = stats.aggregate_stats()
     stats.print_summary()
     stats.plot_confusion_matrix("CNN1D", 0)
+'''

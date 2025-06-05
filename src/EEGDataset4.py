@@ -7,13 +7,13 @@ from typing import List, Tuple
 import torch
 from torch import Tensor
 
-from EEGData import EEGData, EEGTimeSeries
+from src.EEGData import EEGData, EEGTimeSeries
 from scripts.logger_utils import setup_logger
 
 logger = setup_logger("DEBUG")
 
 class EEGDataset(Dataset):
-    def __init__(self, eeg_data: dict[str, set[EEGTimeSeries] | dict[int, set[EEGTimeSeries]]], split: str, validation_fold: int|None=None) -> None:
+    def __init__(self, eeg_data: dict[str, set[EEGTimeSeries] | dict[int, set[EEGTimeSeries]]], split: str, validation_fold: int|None=None, windows_size: int = 300) -> None:
         """
         Inicializa el dataset EEGDataset.
         Args:
@@ -25,8 +25,8 @@ class EEGDataset(Dataset):
         self.samples: List[Tensor] = []
         self.labels:  List[Tensor] = []
 
-        self.letter_to_num   = {'c': 0, 'd': 1, 'l': 2, 'm': 3, 'n': 4, 'r': 5, 's': 6, 't': 7}
-        self.letter_to_label = {'p': 0, 'q': 1}
+        letter_to_num   = {'c': 0, 'd': 1, 'l': 2, 'm': 3, 'n': 4, 'r': 5, 's': 6, 't': 7}
+        letter_to_label = {'p': 0, 'q': 1}
 
         if split in ['train', 'validation']:
             sp = 'train'
@@ -62,13 +62,13 @@ class EEGDataset(Dataset):
 
             x_seq: torch.Tensor = torch.tensor(np_df.T, dtype=torch.float32)
 
-            letter_id = self.letter_to_num[sequence.observed_letter]
-            one_hot_encoding = torch.zeros(len(self.letter_to_num), dtype=torch.float32)
+            letter_id = letter_to_num[sequence.observed_letter]
+            one_hot_encoding = torch.zeros(len(letter_to_num), dtype=torch.float32)
             one_hot_encoding[letter_id] = 1.0
             x_cat = one_hot_encoding.unsqueeze(1).repeat(1, x_seq.shape[1])
             sample = torch.cat((x_seq, x_cat), dim=0)
 
-            key = self.letter_to_label[sequence.chosen_key]
+            key = letter_to_label[sequence.chosen_key]
             label = torch.tensor(key, dtype=torch.long)
 
             self.samples.append(sample)
@@ -114,9 +114,7 @@ def get_dataloader(
     if isinstance(eeg_data, EEGDataset):
         eeg_dataset: EEGDataset = eeg_data
     elif split is not None:
-        if eeg_data is None:
-            eeg_dataset: EEGDataset = EEGDataset(EEGData.initialize().get_data(), split=split, validation_fold=fold)
-        elif isinstance(eeg_data, dict):
+        if isinstance(eeg_data, dict):
             eeg_dataset: EEGDataset = EEGDataset(eeg_data, split=split, validation_fold=fold)
         elif isinstance(eeg_data, EEGData):
             eeg_dataset: EEGDataset = EEGDataset(eeg_data.get_data(), split=split, validation_fold=fold)
@@ -146,3 +144,20 @@ def get_dataloader(
         pin_memory_device='',
         in_order=True
     )
+
+def create_all_dataloaders():
+    """
+    Crea todos los DataLoaders necesarios para el entrenamiento, validación y prueba.
+    Returns:
+        dict[str, DataLoader]: Diccionario con los DataLoaders.
+    """
+    eeg_data: EEGData = EEGData.initialize()
+    dataloaders: dict[str, DataLoader] = {
+        'train': get_dataloader(eeg_data, split='train', fold=0, batch_size=16, shuffle=True),
+        'validation': get_dataloader(eeg_data, split='validation', fold=0, batch_size=16, shuffle=False),
+        'test': get_dataloader(eeg_data, split='test', fold=None, batch_size=16, shuffle=False)
+    }
+    return dataloaders
+
+if __name__ == "__main__":
+    create_all_dataloaders()

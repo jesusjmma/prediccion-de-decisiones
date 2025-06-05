@@ -291,7 +291,6 @@ class Subject:
             museData_path = Config().MUSE_PATH
             Config().PROCESSED_RESULTS_PATH.mkdir(parents=True, exist_ok=True)
             Config().PROCESSED_MUSEDATA_PATH.mkdir(parents=True, exist_ok=True)
-            training_assignment = None
             converter={"Tecla elegida": Subject._bool_converter}
         else:
             results_path = Config().PROCESSED_RESULTS_PATH

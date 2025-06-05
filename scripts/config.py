@@ -9,11 +9,13 @@ from dataclasses import dataclass, field
 from math import gcd
 from pathlib import Path
 import random
+from typing import Literal
 
 import numpy as np
+import pandas as pd
 
 from scripts.logger_utils import setup_logger
-logger = setup_logger(name=Path(__file__).name, level=10)
+logger = setup_logger("DEBUG")
 
 class SingletonMeta(type):
     """Metaclass that ensures a class has only one instance and provides a global point of access to it."""
@@ -40,6 +42,13 @@ class Config(metaclass=SingletonMeta):
     SAMPLING_OFFSET:            np.uint16       = field(init=False)
     TRAINING_DATA_RATIO:        np.float64      = field(init=False)
     TOTAL_FOLDS:                np.uint8        = field(init=False)
+    TIME_BEFORE_EVENT_MAX:      pd.Timedelta    = field(init=False)
+    TIME_BEFORE_EVENT_MIN:      pd.Timedelta    = field(init=False)
+    TIME_AFTER_EVENT_MAX:       pd.Timedelta    = field(init=False)
+    TIME_AFTER_EVENT_MIN:       pd.Timedelta    = field(init=False)
+    EXACT_TIME_BEFORE_EVENT:    pd.Timedelta    = field(init=False)
+    EXACT_TIME_AFTER_EVENT:     pd.Timedelta    = field(init=False)
+    EXACT_TIME:                 bool            = field(init=False)
     SEED:                       int             = field(init=False)
     WINDOWS:                    list[np.uint16] = field(init=False)
     LOCAL_PATH:                 Path            = field(init=False)
@@ -53,6 +62,7 @@ class Config(metaclass=SingletonMeta):
     MUSEDATA_FILES_PREFIX:      Path            = field(init=False)
     MUSEDATA_COLUMNS:           list[str]       = field(init=False)
     MUSEDATA_IMPORTANT_COLUMNS: list[str]       = field(init=False)
+    LETTERS:                    list[str]       = field(init=False)
     MODELS_PATH:                Path            = field(init=False)
     STATS_PATH:                 Path            = field(init=False)
     CONFUSION_MATRICES_PATH:    Path            = field(init=False)
@@ -60,6 +70,7 @@ class Config(metaclass=SingletonMeta):
     STATS_AGGREGATED_FILE:      Path            = field(init=False)
     CONFUSION_MATRICES_PREFIX:  Path            = field(init=False)
     CONFUSION_MATRICES_SUFFIX:  str             = field(init=False)
+    EEGDATA_FILE:               Path            = field(init=False)
 
     def __post_init__(self):
         self.ROOT_PATH = Path(__file__).resolve().parent / self.ROOT_BASE_PATH
@@ -84,6 +95,19 @@ class Config(metaclass=SingletonMeta):
         gcd_windows              = np.uint16(gcd(*self.WINDOWS))
         self.SAMPLING_OFFSET     = np.uint16(max(d for d in range(self.SAMPLING_OFFSET, 0, -1) if gcd_windows % d == 0))
 
+        self.LETTERS = [letter for letter in cfg_data['letters'].replace(" ", "").split(',')]
+
+        self.TIME_BEFORE_EVENT_MAX   = pd.Timedelta(int(cfg_data['time_before_event_max']), unit='ms')
+        self.TIME_BEFORE_EVENT_MIN   = pd.Timedelta(int(cfg_data['time_before_event_min']), unit='ms')
+        self.TIME_AFTER_EVENT_MAX    = pd.Timedelta(int(cfg_data['time_after_event_max']), unit='ms')
+        self.TIME_AFTER_EVENT_MIN    = pd.Timedelta(int(cfg_data['time_after_event_min']), unit='ms')
+        self.EXACT_TIME_BEFORE_EVENT = pd.Timedelta(int(cfg_data['exact_time_before_event']), unit='ms')
+        self.EXACT_TIME_AFTER_EVENT  = pd.Timedelta(int(cfg_data['exact_time_after_event']), unit='ms')
+        if (self.EXACT_TIME_BEFORE_EVENT > pd.Timedelta(0) or self.EXACT_TIME_AFTER_EVENT > pd.Timedelta(0)):
+            self.EXACT_TIME = True
+        else:
+            self.EXACT_TIME = False
+
         self.SEED = int(cfg_rand['seed'])
         random.seed(self.SEED)
 
@@ -105,3 +129,4 @@ class Config(metaclass=SingletonMeta):
         self.CONFUSION_MATRICES_PREFIX = self.ROOT_PATH / cfg_paths['confusion_matrices_files_prefix']
         self.CONFUSION_MATRICES_SUFFIX = cfg_paths['confusion_matrices_files_extension']
 
+        self.EEGDATA_FILE = self.ROOT_PATH / cfg_paths['eegdata_file']

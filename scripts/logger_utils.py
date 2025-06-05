@@ -1,48 +1,78 @@
+"""
+Author: Jesús Maldonado
+Description: This module provides a utility function to set up a logger with both file and console handlers.
+"""
+
 import logging
 import os
 from datetime import datetime
+from pathlib import Path
 
-def setup_logger(name: str = "prediccion_de_decisiones", log_dir: str = "./logs", level: int = logging.DEBUG) -> logging.Logger:
+logger: logging.Logger | None = None
+
+levels = {
+    "DEBUG": logging.DEBUG,
+    "INFO": logging.INFO,
+    "WARNING": logging.WARNING,
+    "ERROR": logging.ERROR,
+    "CRITICAL": logging.CRITICAL
+}
+level_name = {v: k for k, v in levels.items()}
+
+def setup_logger(level: int|str = logging.DEBUG) -> logging.Logger:
     """
-    Configura un logger con salida a consola y a un archivo de log por fecha.
+    Setup a logger with a file handler and a console handler.
 
     Args:
-        name (str): Nombre del logger.
-        log_dir (str): Directorio donde se guardarán los logs.
-        level (int): Nivel mínimo de logs para el logger.
+        level (int|str): Minimum logging level. Can be an integer or a string (DEBUG=10, INFO=20, WARNING=30, ERROR=40, CRITICAL=50).
 
     Returns:
-        logging.Logger: Instancia del logger configurado.
+        logging.Logger: Configured logger instance.
     """
-    logger = logging.getLogger(name)
-    logger.setLevel(level)
+    level = level if isinstance(level, int) else levels[level.upper()]
 
-    # Evita añadir múltiples handlers si ya están configurados
-    if logger.hasHandlers():
+    global logger
+    if logger is not None:
+        logger.debug(f"Logger already created with name '{logger.name}' and level '{level_name[logger.level]}'.")
+        if logger.level != level:
+            logger.warning(f"Logger level mismatch: Required '{level_name[level]}' but found '{level_name[logger.level]}'. Setting to '{level_name[level]}'.")
+            logger.setLevel(level)
         return logger
+    
+    logger = logging.getLogger("prediccion de decisiones")
 
-    # Crear directorio de logs si no existe
-    os.makedirs(os.path.join(os.path.dirname(os.path.abspath(__file__)), log_dir), exist_ok=True)
+    try:
+        logger.setLevel(level)
+    except (ValueError, TypeError):
+        logger.setLevel(logging.DEBUG)
+        logger.warning(f"Invalid logging level '{level}' provided. Defaulting to DEBUG level.")
+    
+    # Logs base path
+    project_root_path = Path(__file__).resolve().parent.parent
+    logs_path = project_root_path / "logs"
 
-    # Generar nombre de archivo basado en la fecha
+    # Create logs directory if it doesn't exist
+    os.makedirs(logs_path, exist_ok=True)
+
+    # Generate log file name based on the current date
     date_str = datetime.now().strftime("%Y-%m-%d")
-    log_file = os.path.join(log_dir, f"{date_str}.log")
+    log_file = os.path.join(logs_path, f"{date_str}.log")
 
-    # Formato de logs
+    # Logs formatter
     formatter = logging.Formatter(
-        fmt='%(asctime)s - %(levelname)s - %(name)s - %(message)s',
+        fmt='%(asctime)s [%(levelname)s] %(module)s/%(funcName)s/%(lineno)d: %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
     )
 
-    # Handler para archivo
+    # File handler
     file_handler = logging.FileHandler(log_file)
     file_handler.setFormatter(formatter)
 
-    # Handler para consola
+    # Console handler
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(formatter)
 
-    # Asignar handlers
+    # Add handlers to the logger
     logger.addHandler(file_handler)
     logger.addHandler(console_handler)
 

@@ -5,14 +5,13 @@ Description: This script trains a Deep Learning model for EEG data classificatio
 
 from pathlib import Path
 import time
-from typing import Any, Callable, List, Tuple
+from typing import Any, Tuple
 
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.optim as optim
 from torch.utils.data import DataLoader
-from sklearn.metrics import accuracy_score, f1_score, confusion_matrix
+from sklearn.metrics import f1_score, confusion_matrix
 
 from EEGData import EEGData, EEGTimeSeries
 from EEGDataset import EEGDataset, get_dataloader
@@ -20,8 +19,6 @@ from cnn1d import CNN1D
 from lstm import LSTM
 from gru import GRU
 from transformer import TransformerEncoder
-from scripts.metrics import Metrics
-from trainer import Trainer
 from model import Model
 from scripts.config import Config
 from scripts.logger_utils import setup_logger
@@ -79,7 +76,7 @@ def get_params(models_params: dict[type[nn.Module], dict[str, Any]],
     
     return params
 
-def test_models(test_dataloader: DataLoader,
+def load_models(test_dataloader: DataLoader,
                 models: dict[type[nn.Module], dict[int, nn.Module]],
                 device: torch.device,
                 loss_fn: nn.Module
@@ -133,100 +130,50 @@ def test_models(test_dataloader: DataLoader,
 
     return stats
 
-def save_model(model: nn.Module,
-               file_base_name: Path | str
-               ) -> None:
-    """Save the model to a file.
-    Args:
-        model (nn.Module): The model to save.
-        name (str): The name of the file to save the model to.
-    """
-    if isinstance(file_base_name, str):
-        file_base_name = Path(file_base_name)
+def load_and_test_models(eeg_data: dict[str, set[EEGTimeSeries] | dict[int, set[EEGTimeSeries]]],
+                         saved_models: list[tuple[type[nn.Module], Path]],
+                         models_params: dict[type[nn.Module], dict[str, Any]],
+                         device: torch.device,
+                         params: dict[str, Any],
+                         loss_function: nn.Module = nn.BCEWithLogitsLoss()
+                         ) -> None:
     
-    Config().MODELS_PATH.mkdir(parents=True, exist_ok=True)
-    file = Config().MODELS_PATH / file_base_name
-    if file.exists():
-        file = Config().MODELS_PATH / f"{file_base_name.stem}_{time.strftime('%Y_%m_%d_%H_%M_%S')}{file_base_name.suffix}"
-
-    torch.save(model.state_dict(), file)
-    logger.info(f"Model {model.__class__.__name__} saved to {file}")
-
-def eval_epoch(model: nn.Module,
-               loader: DataLoader,
-               device: torch.device
-               ) -> float:
-    """Evaluate the model on the validation fold.
-    Args:
-        model (nn.Module): The model to evaluate.
-        loader (DataLoader): The dataloader for the validation data.
-        device (torch.device): The device to use for evaluation.
-    Returns:
-        accuracy (float): The accuracy of the model on the validation fold.
-    """
+    logger.info("Starting training and testing process")
+    folds: int = params['folds']
     start_time: float = time.time()
-    logger.info("Evaluating model")
-    y_true = []
-    y_pred = []
-
-    model.eval()
-    with torch.no_grad():
-        for X, y in loader:
-            X, y = X.to(device), y.to(device)
-            outputs = model(X).squeeze(1)
-            probs = torch.sigmoid(outputs)
-            predicted = (probs >= 0.5).long()
-            y_true.extend(y.float().cpu().numpy())
-            y_pred.extend(predicted.cpu().numpy())
-
+    train_validation_datasets: dict[int, Tuple[EEGDataset, EEGDataset]]
+    test_dataset: EEGDataset
+    train_validation_datasets, test_dataset = get_datasets(eeg_data, folds=folds)
     end_time: float = time.time()
-    logger.info(f"Time for evaluation epoch: {end_time - start_time:.3f} seconds")
-    return float(accuracy_score(y_true, y_pred))
+    logger.info(f"Time to create datasets: {end_time - start_time:.3f} seconds")
 
-def train_epoch(model: nn.Module,
-                loader: DataLoader,
-                loss_fn: Callable,
-                optimizer: optim.Optimizer,
-                device: torch.device
-                ) -> Tuple[float, float]:
-    """Train the model for one epoch.
-    Args:
-        model (nn.Module): The model to train.
-        loader (DataLoader): The dataloader for the training data.
-        loss_fn (Callable): The loss function.
-        optimizer (optim.Optimizer): The optimizer.
-        device (torch.device): The device to use for training.
-    Returns:
-        (train_epoch_loss, train_epoch_acc) (Tuple[float, float]): The training loss and accuracy.
-    """
     start_time: float = time.time()
-    logger.info("Training model")
-    model.train()
-    train_loss = 0.0
-    train_correct = 0
-    train_total = 0
-
-    for X, y in loader:
-        X, y = X.to(device), y.to(device)
-        optimizer.zero_grad()
-        outputs = model(X).squeeze(1)
-        loss = loss_fn(outputs, y.float())
-        loss.backward()
-        optimizer.step()
-
-        train_loss += loss.item() * y.size(0)
-        probs = torch.sigmoid(outputs)
-        predicted = (probs >= 0.5).long()
-        y: torch.Tensor
-        model.metrics["train"].update_metrics(y, outputs, loss.item())
-        train_total += y.size(0)
-        train_correct += (predicted == y).sum().item()
-    train_epoch_loss = train_loss / train_total
-    train_epoch_acc = train_correct / train_total
-    logger.info(f"Train | Loss: {train_epoch_loss:.4f} | Accuracy: {train_epoch_acc:.4f}")
+    test_dataloader: DataLoader
+    _, test_dataloader = get_dataloaders(train_validation_datasets, test_dataset, params)
     end_time: float = time.time()
-    logger.info(f"Time for training epoch: {end_time - start_time:.3f} seconds")
-    return train_epoch_loss, train_epoch_acc
+    logger.info(f"Time to create dataloaders: {end_time - start_time:.3f} seconds")
+
+    trained_models: list[dict[type[nn.Module], dict[int, nn.Module]]] = []
+
+    print (f"Saved models: {saved_models}")
+    for model_type, model_file in saved_models:
+        if not model_file.exists():
+            logger.warning(f"Model file {model_file} does not exist. Training from scratch.")
+            continue
+        
+        model = load_model(model_type, {model_type: model_file}, models_params, device)
+        if model is None:
+            logger.warning(f"Model {model_type.__name__} not found.")
+            continue
+        model = model.to(device)
+
+        trained_models.append({model_type: {0: model}})
+
+    stats: dict[type[nn.Module], dict[int, dict[str, float | np.ndarray]]]
+
+    for trained_model in trained_models:
+        stats = load_models(test_dataloader, trained_model, device, loss_function)
+        logger.info(stats)
 
 def load_model(model_type: type[nn.Module],
                saved_models: dict[type[nn.Module], Path],
@@ -254,75 +201,6 @@ def load_model(model_type: type[nn.Module],
 
     return model                
 
-def train_and_validation(train_val_dataloaders: dict[int, Tuple[DataLoader, DataLoader]],
-                         models: list[type[nn.Module]],
-                         models_params: dict[type[nn.Module], dict[str, Any]],
-                         saved_models: dict[type[nn.Module], Path],
-                         params: dict[str, Any],
-                         device: torch.device,
-                         loss_function: nn.Module
-                         ) -> dict[type[nn.Module], dict[int, nn.Module]]:
-    """Train and validate the model.
-    Args:
-        train_val_dataloaders (dict[int, Tuple[DataLoader, DataLoader]]): Dictionary with fold number as key and a tuple of train and validation DataLoaders as value.
-        models (list[nn.Module]): List of models to train.
-        params (dict[str, Any]): Dictionary with parameters for training.
-        device (torch.device): Device to use for training.
-        loss_function (nn.Module): Loss function to use for training.
-    Returns:
-        trained_models (dict[type[nn.Module], dict[int, nn.Module]]): Dictionary with model type as key and a dictionary with fold number as key and the trained model as value.
-    """
-    logger.info("Starting training and validation models")
-
-    ne: int   = params['n_epochs']
-    lr: float = params['lr']
-
-    trained_models: dict[type[nn.Module], dict[int, nn.Module]] = {}
-    
-    for model_type in models:
-        start_model_time: float = time.time()
-        trained_models[model_type] = {}
-        logger.info(f"Starting processing for model: {model_type.__name__}")
-
-        params = get_params(models_params, model_type)
-    
-        for fold, (train_dl, val_dl) in train_val_dataloaders.items():
-            logger.info(f"Fold {fold}/{len(train_val_dataloaders)}")
-
-            model_fold: nn.Module | None = load_model(model_type, saved_models, models_params, device)
-
-            if model_fold is None:
-                logger.info(f"Creating model {model_type.__name__}")
-                model_fold = model_type(**params)
-                logger.info(f"Model {model_fold.__class__.__name__} created for fold {fold}")
-
-            model_fold = model_fold.to(device)
-
-            optimizer = optim.Adam(model_fold.parameters(), lr=lr)
-
-            trained_models[model_type][fold] = model_fold
-            
-            best_validation_accuracy_for_this_fold = 0.0
-            for epoch in range(1, ne + 1):
-                start_time: float = time.time()
-                logger.info(f"Epoch {epoch}/{ne}")
-                logger.info(f"Training")
-                train_epoch(model_fold, train_dl, loss_function, optimizer, device)
-                logger.info(f"Validating")
-                val_accuracy = eval_epoch(model_fold, val_dl, device)
-                logger.info(f"Validation Accuracy: {val_accuracy:.4f}")
-                
-                if val_accuracy > best_validation_accuracy_for_this_fold:
-                    best_validation_accuracy_for_this_fold = val_accuracy
-                    save_model(model_fold, f"{model_fold.__class__.__name__}_{get_params(models_params, model_type)}_ValFold{fold}_Epoch{epoch}_Acc{val_accuracy}.pth")
-                
-                end_time: float = time.time()
-                logger.info(f"Time for the full epoch ({epoch}): {end_time - start_time:.3f} seconds")
-        
-        end_model_time: float = time.time()
-        logger.info(f"Total time for processing model {model_type.__name__}: {int((end_model_time - start_model_time) // 3600)}:{int(((end_model_time - start_model_time) % 3600) // 60)}:{int((end_model_time - start_model_time) % 60)}")
-    return trained_models
-
 def get_dataloaders(
         train_validation_datasets: dict[int, Tuple[EEGDataset, EEGDataset]], 
         test_dataset: EEGDataset,
@@ -345,15 +223,15 @@ def get_dataloaders(
     nw: int  = params['num_workers']
     pm: bool = params['pin_memory']
 
-    train_val_dl: dict[int, Tuple[DataLoader, DataLoader]] = {}
-    test_dl: DataLoader = get_dataloader(test_dataset, batch_size=bs, shuffle=False, num_workers=nw, pin_memory=pm, split='test', fold=None)
+    train_validation_dataloaders: dict[int, Tuple[DataLoader, DataLoader]] = {}
+    test_dataloader: DataLoader = get_dataloader(test_dataset, batch_size=bs, shuffle=False, num_workers=nw, pin_memory=pm, split='test', fold=None)
 
     for fold, datasets in train_validation_datasets.items():
         train_dataloader = get_dataloader(datasets[0], batch_size=bs, shuffle=sh, num_workers=nw, pin_memory=pm, split='train', fold=fold)
         validation_dataloader = get_dataloader(datasets[1], batch_size=bs, shuffle=sh, num_workers=nw, pin_memory=pm, split='validation', fold=fold)
-        train_val_dl[fold] = (train_dataloader, validation_dataloader)
+        train_validation_dataloaders[fold] = (train_dataloader, validation_dataloader)
     
-    return train_val_dl, test_dl
+    return train_validation_dataloaders, test_dataloader
 
 def get_datasets(data: dict[str, set[EEGTimeSeries] | dict[int, set[EEGTimeSeries]]],
                  folds: int
@@ -376,42 +254,6 @@ def get_datasets(data: dict[str, set[EEGTimeSeries] | dict[int, set[EEGTimeSerie
         train_validation_datasets[fold] = (train_dataset, validation_dataset)
     
     return train_validation_datasets, test_dataset
-
-def train_and_test(eeg_data: dict[str, set[EEGTimeSeries] | dict[int, set[EEGTimeSeries]]],
-                   models: list[type[nn.Module]],
-                   models_params: dict[type[nn.Module], dict[str, Any]],
-                   saved_models: dict[type[nn.Module], Path],
-                   params: dict[str, Any],
-                   device: torch.device,
-                   loss_function: nn.Module = nn.BCEWithLogitsLoss()
-                   ) -> None:
-    """
-    Train and test the models.
-    Args:
-        eeg_data (dict[str, set[EEGTimeSeries] | dict[int, set[EEGTimeSeries]]]): Dictionary with the data.
-        models (list[nn.Module]): List of models to train.
-        params (dict[str, Any]): Dictionary with parameters for training.
-        device (torch.device): Device to use for training.
-    """
-    logger.info("Starting training and testing process")
-    folds: int = params['folds']
-    start_time: float = time.time()
-    train_validation_datasets: dict[int, Tuple[EEGDataset, EEGDataset]]
-    test_dataset: EEGDataset
-    train_validation_datasets, test_dataset = get_datasets(eeg_data, folds=folds)
-    end_time: float = time.time()
-    logger.info(f"Time to create datasets: {end_time - start_time:.3f} seconds")
-
-    start_time: float = time.time()
-    train_val_dataloaders: dict[int, Tuple[DataLoader, DataLoader]]
-    test_dataloader: DataLoader
-    train_val_dataloaders, test_dataloader = get_dataloaders(train_validation_datasets, test_dataset, params)
-    end_time: float = time.time()
-    logger.info(f"Time to create dataloaders: {end_time - start_time:.3f} seconds")
-
-    trained_models: dict[type[nn.Module], dict[int, nn.Module]] = train_and_validation(train_val_dataloaders, models, models_params, saved_models, params, device, loss_function)
-
-    stats: dict[type[nn.Module], dict[int, dict[str, float | np.ndarray]]] = test_models(test_dataloader, trained_models, device, loss_function)
 
 def load_data(file: Path | str | None = None) -> dict[str, set[EEGTimeSeries] | dict[int, set[EEGTimeSeries]]]:
     """
@@ -445,51 +287,7 @@ def load_data(file: Path | str | None = None) -> dict[str, set[EEGTimeSeries] | 
 
     return data
 
-def save_data(data: dict[str, set[EEGTimeSeries] | dict[int, set[EEGTimeSeries]]],
-              file: Path | str | None = None
-              ) -> None:
-    """
-    Save the data to a file.
-    Args:
-        data (dict[str, set[EEGTimeSeries] | dict[int, set[EEGTimeSeries]]]): Dictionary with the data.
-    """
-    if file is None:
-        file = Config().EEGDATA_FILE
-    elif isinstance(file, str):
-        file = Path(file)
-
-    logger.info(f"Saving data to {file}")
-    final_file = EEGData.save_data(file, data)
-    logger.info(f"Data saved to {final_file}")
-
-def extract_data(eeg_data: EEGData) -> dict[str, set[EEGTimeSeries] | dict[int, set[EEGTimeSeries]]]:
-    """
-    Extract the data from the EEGData object.
-    Args:
-        eeg_data (EEGData): EEGData object.
-    Returns:
-        data (dict[str, set[EEGTimeSeries] | dict[int, set[EEGTimeSeries]]]): Dictionary with the data.
-    """
-    logger.info("Extracting data")
-    data: dict[str, set[EEGTimeSeries] | dict[int, set[EEGTimeSeries]]] = eeg_data.get_data()
-    logger.info("Data extracted")
-
-    return data
-
-def create_data() -> EEGData:
-    """
-    Create the data for the model.
-    Returns:
-        eeg_data (EEGData): EEGData object.
-    """
-    logger.info("Creating data")
-    eeg_data: EEGData = EEGData.initialize()
-    logger.info("Data created")
-    
-    return eeg_data
-
 def main() -> None:
-    new_data: bool = False
     params = {
         'folds':       3,       # Number of folds for cross-validation.
         'batch_size':  16,      # Batch size: number of samples (museData rows) processed before the model is updated.
@@ -506,55 +304,173 @@ def main() -> None:
         #    'kernel_sizes':    [5, 3],
         #    'dropout_rate':    0.5
         #},
-        #LSTM: {
-        #    'in_channels': 28,
-        #    'hidden_size': 64,
-        #    'num_layers': 1,
-        #    'bidirectional': False,
-        #    'dropout_rate': 0.2
-        #},
-        #GRU: {
-        #    'in_channels': 28,
-        #    'hidden_size': 64,
-        #    'num_layers': 1,
-        #    'bidirectional': False,
-        #    'dropout_rate': 0.2
-        #},
-        TransformerEncoder: {
+        LSTM: {
             'in_channels': 28,
-            'd_model': 128,
-            'nhead': 8,
+            'hidden_size': 64,
             'num_layers': 1,
-            'dim_feedforward': 256,
+            'bidirectional': False,
             'dropout_rate': 0.2
         }
     }
 
-    models: list[type[nn.Module]] = [
-        #CNN1D,
-        #LSTM,
-        #GRU,
-        TransformerEncoder
-        ]
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    eeg_data: dict[str, set[EEGTimeSeries] | dict[int, set[EEGTimeSeries]]] = load_data(Config().ROOT_PATH / "eegdata_2025_05_04_22_27_03.pkl")  # Load the data from a file
+    loss_function: nn.BCEWithLogitsLoss = nn.BCEWithLogitsLoss()
+
+    saved_models_test: list[tuple[type[nn.Module], str]] = [
+        (LSTM, "LSTM_{'in_channels': 28, 'hidden_size': 64, 'num_layers': 1, 'bidirectional': False, 'dropout_rate': 0.2}_ValFold0_Epoch86_Acc0.5263157894736842"),
+        (LSTM, "LSTM_{'in_channels': 28, 'hidden_size': 64, 'num_layers': 1, 'bidirectional': False, 'dropout_rate': 0.2}_ValFold0_Epoch27_Acc0.5247208931419458"),
+        (LSTM, "LSTM_{'in_channels': 28, 'hidden_size': 64, 'num_layers': 1, 'bidirectional': False, 'dropout_rate': 0.2}_ValFold0_Epoch7_Acc0.5151515151515151"),
+        (LSTM, "LSTM_{'in_channels': 28, 'hidden_size': 64, 'num_layers': 1, 'bidirectional': False, 'dropout_rate': 0.2}_ValFold0_Epoch4_Acc0.507177033492823  "),
+        (LSTM, "LSTM_{'in_channels': 28, 'hidden_size': 64, 'num_layers': 1, 'bidirectional': False, 'dropout_rate': 0.2}_ValFold0_Epoch1_Acc0.48484848484848486"),
+        (LSTM, "LSTM_{'in_channels': 28, 'hidden_size': 64, 'num_layers': 1, 'bidirectional': False, 'dropout_rate': 0.2}_ValFold1_Epoch68_Acc0.5709728867623605"),
+        (LSTM, "LSTM_{'in_channels': 28, 'hidden_size': 64, 'num_layers': 1, 'bidirectional': False, 'dropout_rate': 0.2}_ValFold1_Epoch66_Acc0.569377990430622"),
+        (LSTM, "LSTM_{'in_channels': 28, 'hidden_size': 64, 'num_layers': 1, 'bidirectional': False, 'dropout_rate': 0.2}_ValFold1_Epoch62_Acc0.5598086124401914"),
+        (LSTM, "LSTM_{'in_channels': 28, 'hidden_size': 64, 'num_layers': 1, 'bidirectional': False, 'dropout_rate': 0.2}_ValFold1_Epoch18_Acc0.543859649122807"),
+        (LSTM, "LSTM_{'in_channels': 28, 'hidden_size': 64, 'num_layers': 1, 'bidirectional': False, 'dropout_rate': 0.2}_ValFold1_Epoch2_Acc0.5406698564593302"),
+        (LSTM, "LSTM_{'in_channels': 28, 'hidden_size': 64, 'num_layers': 1, 'bidirectional': False, 'dropout_rate': 0.2}_ValFold1_Epoch1_Acc0.5247208931419458"),
+        (LSTM, "LSTM_{'in_channels': 28, 'hidden_size': 64, 'num_layers': 1, 'bidirectional': False, 'dropout_rate': 0.2}_ValFold2_Epoch36_Acc0.5357710651828299"),
+        (LSTM, "LSTM_{'in_channels': 28, 'hidden_size': 64, 'num_layers': 1, 'bidirectional': False, 'dropout_rate': 0.2}_ValFold2_Epoch36_Acc0.5357710651828299"),
+        (LSTM, "LSTM_{'in_channels': 28, 'hidden_size': 64, 'num_layers': 1, 'bidirectional': False, 'dropout_rate': 0.2}_ValFold2_Epoch26_Acc0.5325914149443561"),
+        (LSTM, "LSTM_{'in_channels': 28, 'hidden_size': 64, 'num_layers': 1, 'bidirectional': False, 'dropout_rate': 0.2}_ValFold2_Epoch20_Acc0.5278219395866455"),
+        (LSTM, "LSTM_{'in_channels': 28, 'hidden_size': 64, 'num_layers': 1, 'bidirectional': False, 'dropout_rate': 0.2}_ValFold2_Epoch4_Acc0.5262321144674086"),
+        (LSTM, "LSTM_{'in_channels': 28, 'hidden_size': 64, 'num_layers': 1, 'bidirectional': False, 'dropout_rate': 0.2}_ValFold2_Epoch1_Acc0.5246422893481717"),
+    ]
+
+    saved_models_to_test: list[tuple[type[nn.Module], Path]] = []
+    for model_type, model_file in saved_models_test:
+        saved_models_to_test.append((model_type, Config().MODELS_PATH / Path(model_file+".pth")))
     
+    load_and_test_models(eeg_data, saved_models_to_test, models_params, device, params, loss_function)
+    return
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+def print_stats(stats: dict[int, dict[str, Any]]) -> None:
+    """
+    Print the statistics of the models.
+    Args:
+        stats (dict[int, dict[str, Any]]): Dictionary with model id as key and a dictionary with statistics as value.
+    """
+    for model_id, model_stats in stats.items():
+        logger.info(f"Model {model_id}:")
+        for stat_name, stat_value in model_stats.items():
+            logger.info(f"{stat_name}: {stat_value}")
+
+def load_data2(test_data_file: str, params: dict[str, Any]) -> DataLoader:
+    eeg_data: dict[str, set[EEGTimeSeries] | dict[int, set[EEGTimeSeries]]] = load_data(Config().ROOT_PATH / test_data_file)
+
+    train_validation_datasets, test_dataset = get_datasets(eeg_data, folds=int(Config().TOTAL_FOLDS))
+
+    test_dataloader: DataLoader
+    _, test_dataloader = get_dataloaders(train_validation_datasets, test_dataset, params)
+
+    return test_dataloader
+
+def load_models2(models_files: list[str] ) -> list[int]:
+    for file in models_files:
+        model = Model(path=file)
+        logger.info(f"Model loaded: {model}")
+
+    models: list[int] = Model.get_available_models()
+
+    return models
+
+def test_model2(m: Model,
+                test_dataloader: DataLoader,
+                loss_fn: nn.Module = nn.BCEWithLogitsLoss()
+               ) -> dict[str, Any]:
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    eeg_data: dict[str, set[EEGTimeSeries] | dict[int, set[EEGTimeSeries]]]
-    if new_data:
-        data: EEGData = create_data()  # Create the EEGData object
-        eeg_data = extract_data(data)  # Extract the data from the EEGData object
-        save_data(eeg_data)  # Save the data to a file
-    else:
-        eeg_data = load_data(Config().ROOT_PATH / "eegdata_2025_05_04_22_27_03.pkl")  # Load the data from a file
-    loss_function: nn.BCEWithLogitsLoss = nn.BCEWithLogitsLoss()
-    saved_models: dict[type[nn.Module], Path] = {}
-    '''
-    saved_models = {
-        CNN1D: Config().MODELS_PATH / Path("CNN1D_ValFold0_Epoch132_Acc0.5582137161084529.pth")
+
+    logger.info(f"Testing model: {m}")
+    model = m.module
+    model.eval()
+
+    test_loss = 0.0
+    test_correct = 0
+    test_total = 0
+    all_preds = []
+    all_labels = []
+    with torch.no_grad():
+        for X, y in test_dataloader:
+            X, y = X.to(device), y.to(device)
+            outputs = model(X).squeeze(1)
+            loss = loss_fn(outputs, y.float())
+
+            test_loss += loss.item() * y.size(0) #TODO Revisar esta (y todas) las estadísticas
+            probs = torch.sigmoid(outputs)
+            predicted = (probs >= 0.5).long()
+            test_total += y.size(0)
+            test_correct += (predicted == y).sum().item()
+            all_preds.extend(predicted.cpu().numpy())
+            all_labels.extend(y.cpu().numpy())
+    test_epoch_loss = float(test_loss / test_total) #TODO Revisar esta (y todas) las estadísticas
+    test_epoch_acc = float(test_correct / test_total)
+    test_epoch_f1 = float(f1_score(all_labels, all_preds, average='macro'))
+    test_epoch_cm: np.ndarray = confusion_matrix(all_labels, all_preds)
+    stats = {
+        'loss': test_epoch_loss,
+        'accuracy': test_epoch_acc,
+        'f1_score': test_epoch_f1,
+        'confusion_matrix': test_epoch_cm
     }
-    #'''
+    logger.info(f"Test | Loss: {test_epoch_loss:.4f} | Accuracy: {test_epoch_acc:.4f} | F1 Score: {test_epoch_f1:.4f}")
+    logger.info(f"Confusion Matrix:\n{test_epoch_cm}")
+
+    return stats
+
+def test_models2(models: list[int],
+                 test_dataloader: DataLoader,
+                 loss_function: nn.Module = nn.BCEWithLogitsLoss()
+                ) -> dict[int, dict[str, Any]]:
     
-    train_and_test(eeg_data, models, models_params, saved_models, params, device, loss_function)
+    stats: dict[int, dict[str, Any]] = {}
+
+    for m in models:
+        start_time: float = time.time()
+        model = Model.get_model(m)
+        stats[m] = {}
+        stats[m] = test_model2(model, test_dataloader, loss_function)
+        end_time: float = time.time()
+        logger.info(f"Time to test model {model.id}: {end_time - start_time:.3f} seconds")
+
+    return stats
+
+def main2() -> None:
+    params = {
+        'batch_size':  16,      # Batch size: number of samples (museData rows) processed before the model is updated.
+        'shuffle':     True,    # Whether to shuffle the data at every epoch.
+        'num_workers': 4,       # Number of subprocesses to use for data loading. More workers = more speed loading data = more memory usage.
+        'pin_memory':  False    # Whether to pin memory for faster data transfer to GPU. It is recommended to set this to True if you are using a GPU. If you are using a CPU, set it to False.
+    }
+
+    test_data_file = "eegdata_2025_05_04_22_27_03.pkl"
+    models_files = [
+        "LSTM_200011_{'in_channels': 28, 'hidden_size': 64, 'num_layers': 1, 'bidirectional': False, 'dropout_rate': 0.2}_ValFold1_Epoch68_Acc0.5709728867623605",
+        "TransformerEncoder_400003_{'in_channels': 28, 'd_model': 128, 'nhead': 8, 'num_layers': 1, 'dim_feedforward': 256, 'dropout_rate': 0.2}_ValFold0_Epoch4_Acc0.5311004784688995"
+    ]
+
+    test_dataloader = load_data2(test_data_file, params)
+    models = load_models2(models_files)
+    models_stats = test_models2(models, test_dataloader)
+    print_stats(models_stats)
+
+    return
 
 if __name__ == '__main__':
-    main()
+    main2()
