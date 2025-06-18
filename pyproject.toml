@@ -23,7 +23,7 @@ scikit-learn = "^1.6.1"
 imbalanced-learn = "^0.13.0"
 matplotlib = "^3.10.1"
 seaborn = "^0.13.2"
-torch = "^2.7.0"
+torch = "^2.7.1"
 
 [build-system]
 requires = ["poetry-core"]
